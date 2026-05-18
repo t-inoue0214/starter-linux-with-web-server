@@ -1,0 +1,26 @@
+{
+    "name": "Linux-Hard-Way-Learning",
+    "image": "mcr.microsoft.com/devcontainers/base:debian",
+    "runArgs": ["--privileged", "--cgroupns=host"],
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "MS-CEINTL.vscode-language-pack-ja"
+            ],
+            "settings": {
+                "terminal.integrated.defaultProfile.linux": "bash",
+                "terminal.integrated.fontSize": 14,
+                "terminal.integrated.scrollback": 5000,
+                "files.encoding": "utf8"
+            }
+        }
+    },
+    "forwardPorts": [80, 443, 8080],
+    "portsAttributes": {
+        "80":   { "label": "Nginx HTTP",    "onAutoForward": "notify" },
+        "443":  { "label": "Nginx HTTPS",   "onAutoForward": "notify" },
+        "8080": { "label": "Nginx 代替ポート", "onAutoForward": "notify" }
+    },
+    "remoteUser": "vscode",
+    "postCreateCommand": "bash .devcontainer/setup.sh"
+}
