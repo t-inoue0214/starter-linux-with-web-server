@@ -248,6 +248,8 @@ Download-Size: 57.9 kB
 Description: displays an indented directory tree, in color
 ```
 
+> **（主要フィールドのみ表示）** 実際の出力には `Homepage`・`Tag`・`APT-Sources` 等のフィールドも含まれます。
+
 `Depends: libc6 (>= 2.38)` は依存関係です。`tree` を使うには `libc6` バージョン 2.38 以上が必要で、`apt` が自動的に解決します。
 
 #### apt list --installed — インストール済みパッケージを一覧する
@@ -265,6 +267,8 @@ coreutils/stable,now 9.7-3 arm64 [installed,automatic]
 curl/now 8.14.1-2+deb13u2 arm64 [installed,upgradable to: 8.14.1-2+deb13u3]
 dash/stable,now 0.5.12-12 arm64 [installed,automatic]
 ```
+
+> **（環境によって表示されるパッケージは異なります）** Codespaces の環境構成によってインストール済みパッケージの一覧と順番は変わります。
 
 | タグ | 意味 |
 |:---|:---|
@@ -320,11 +324,7 @@ $ tree -L 1 /usr/local
 11 directories, 0 files
 ```
 
-> **第17章との繋がり:**
-> 第17章では nginx を `/usr/local/nginx/` にインストールします。
-> `apt install nginx` を使えばこのような手順は不要ですが、
-> ソースからビルドすることで独自設定や特定バージョンを選べます。
-> 理由はこの章末のコラムで詳しく説明します。
+> **この章の後半（4-6 節）で実際に nginx をインストールして動かし、「なぜ手動ビルドするのか」を体験します。**
 
 #### sudo apt purge — 完全削除（設定ファイルも削除）
 
@@ -437,9 +437,52 @@ $ dpkg -L coreutils | head -20
 
 ---
 
+### 4-6. パッケージ管理の応用体験：Nginx を動かしてみる
+
+この章で学んだ `apt install` と `dpkg` を使って、Web サーバー「nginx」を実際に動かしてみましょう。
+
+> **nginx（エンジンエックス）とは?**
+> Web ブラウザからのリクエストを受け取り、HTML ファイルを返すプログラムです。
+> Web サイトを公開するサーバー側で動くソフトウェアです。
+> nginx はこの章の後もインストールしたまま残しておきます。第5章でこの設定ファイルを実際に vim で開きます。
+> nginx を削除するのは第17章の冒頭（ソースビルドの直前）です。
+
+```bash
+# 1. nginx をインストール
+$ sudo apt install nginx
+
+# 2. ブラウザで確認
+#    Codespaces の「ポート」タブ → ポート 80 の地球儀アイコンをクリック
+#    → ブラウザで「Welcome to nginx!」と表示されれば成功
+
+# 3. インストールされたファイルを確認（dpkg の復習）
+$ dpkg -L nginx | head -20    # nginx に含まれるファイル一覧
+$ dpkg -s nginx               # パッケージの詳細情報（バージョン・依存関係）
+
+# 4. ファイルを少し覗いてみる（今は完全に理解できなくて OK）
+$ cat /etc/nginx/nginx.conf   # 設定ファイル
+$ ls /var/log/nginx/          # ログの保存場所
+```
+
+nginx がブラウザから見えたということは、何かが動いて 80 番ポートで「待ち受け」ていたはずです。
+でも今の段階では、まだその仕組みをすべて説明できません。これが「謎」です。
+
+#### 謎リスト — 第5章以降の学習で順番に解決します
+
+| 今は謎なこと | 答えが見つかる章 |
+|:---|:---|
+| `/etc/nginx/nginx.conf` はどうやって編集する? | 第5章（テキストエディタ） |
+| nginx はどのユーザーで動いている?（`ps aux \| grep nginx` で確認） | 第9章（ユーザー管理） |
+| `/etc/nginx/` のファイルはなぜ root が所有している? | 第11章（パーミッション） |
+| 「80番ポートで待ち受ける」とはどういう意味? | 第12章（ネットワーク） |
+| `/var/log/nginx/access.log` はどう読む? | 第14章（OS ログ） |
+| nginx の起動・停止・自動起動はどう管理する? | 第15章（systemd） |
+
+---
+
 ### コラム: apt でインストールできるのに、なぜソースからビルドするのか?
 
-`apt install nginx` を使えば nginx を数秒でインストールできます。
+4-6 節で `apt install nginx` を実行し、nginx がすぐ動くことを確認しました。
 それでも第17章でソースからビルドする理由は何でしょうか。
 
 | 理由 | 詳細 |
@@ -503,7 +546,7 @@ $ dpkg -L coreutils | head -20
 
 </details>
 
-1. `apt remove vim` と `apt purge vim` の違いを説明せよ。
+2. `apt remove vim` と `apt purge vim` の違いを説明せよ。
 
 <details><summary>答え</summary>
 
@@ -513,7 +556,7 @@ $ dpkg -L coreutils | head -20
 
 </details>
 
-1. `/usr/bin/ls` がどのパッケージに含まれているか調べるコマンドは何か?
+3. `/usr/bin/ls` がどのパッケージに含まれているか調べるコマンドは何か?
 
 <details><summary>答え</summary>
 
@@ -524,23 +567,51 @@ $ dpkg -L coreutils | head -20
 
 </details>
 
-1. リポジトリとは何か、ひと言で説明せよ。
+4. `apt` における「リポジトリ」とは何か、ひと言で説明せよ。
 
 <details><summary>答え</summary>
 
-パッケージを配布するサーバーです。
+`apt` がパッケージを取得しに行くサーバーのことです。
 スマートフォンの「App Store のサーバー部分」に相当します。
 `/etc/apt/sources.list.d/debian.sources` にアクセス先の URL が記述されています。
 
+> **「リポジトリ」という言葉はほかにも使われる**
+> Git のリポジトリ（ソースコードの保管場所）や Maven のリポジトリ（Java ライブラリの配布元）など、
+> 「何かを保管・配布する場所」を広く指す言葉です。
+> ここでは文脈から「apt のパッケージリポジトリ」を指しています。
+
 </details>
 
-1. `apt` と `dpkg` の役割の違いは何か?
+5. `apt` と `dpkg` の役割の違いは何か?
 
 <details><summary>答え</summary>
 
 `apt` は依存関係を自動で解決し、リポジトリからダウンロードして `dpkg` を呼び出す高レベルツールです。
 `dpkg` は個別の `.deb` ファイルを直接インストール・管理する低レベルツールです。
 日常的な操作は `apt` を使い、パッケージの調査や問題の診断に `dpkg` を使います。
+
+</details>
+
+6. 4-6 節で `apt install nginx` を実行した後、nginx がどのポートで待ち受けているか確認するには何をすれば良いか? また、その謎が解決される章はどこか?
+
+<details><summary>答え</summary>
+
+Codespaces の「ポート」タブにポート 80 が表示されていることで確認できます。
+コマンドでも複数の方法で確認できます。
+
+```bash
+# 方法1: ss — 待ち受けポートを一覧（第12章で学ぶ）
+$ ss -tlnp
+
+# 方法2: ps でプロセスIDを調べてから netstat で絞り込む
+$ ps -ef | grep nginx          # nginx のプロセスID（PID）を確認
+$ netstat -naop | grep <PID>   # そのPIDが使うポートを確認
+
+# 方法3: lsof — プロセスが開いているファイル・ポートを確認
+$ lsof -i :80                  # 80番ポートを使っているプロセスを一覧
+```
+
+「80番ポートで待ち受ける」という仕組みの意味と、これらのコマンドの詳細は第12章（ネットワーク基礎）で理解できます。
 
 </details>
 
