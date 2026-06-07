@@ -15,7 +15,7 @@
 - Linux の基本コマンドを使いこなし、ファイル・プロセス・リソースを操作できる
 - bashrc をカスタマイズして自分専用の開発環境を構築できる
 - ユーザー・グループ・パーミッションを設計・管理できる
-- systemd でサービスを登録・管理できる
+- service/systemd でサービスを登録・管理できる
 - OS ログ（syslog, journald）を読んでトラブルシューティングできる
 - Nginx をソースコードからビルドして手動でセットアップできる
 - **「コンテナの中身を理解できるエンジニア」として Docker の価値を実感できる**
@@ -87,30 +87,33 @@
 
 ## 📚 3. この講座で学ぶこと
 
-この講座は **20章構成**です。`chapter-00/` から順番に進めてください。
+この講座は **23章構成**です。`chapter-00/` から順番に進めてください。
 
 | 章 | タイトル | 形式 | 学ぶ主な内容 |
 |:--|:--|:--|:--|
 | **第0章** | [Linux の歴史・ディストリビューションとは](./chapter-00/README.md) | 説明 | Unix の歴史、ディストリ比較、オープンソース |
-| **第1章** | シェルの種類と選び方 | 説明+実習 | bash / zsh / fish の比較、シェルとは何か |
-| **第2章** | 基本コマンドを使いこなす | 実習 | ls, cd, find, grep, ps, df, free ほか30コマンド |
-| **第3章** | ディレクトリ構成を知る | 説明+実習 | FHS、/etc /var /proc /dev の役割、ディストリ別差異 |
-| **第4章** | パッケージ管理 | 実習 | apt, dpkg、yum/dnf/rpm との比較 |
-| **第5章** | テキストエディタ3種を使う | 実習 | vi / nano / emacs の基本操作 |
-| **第6章** | シェル環境をカスタマイズする | 実習 | bashrc、bash_profile、エイリアス、PS1 |
-| **第7章** | 環境変数・入力補完・カラー表示 | 実習 | export、Tab 補完、ls/grep のカラー化 |
-| **第8章** | Locale・Timezone を設定する | 実習+説明 | locale-gen、timedatectl、カーネルとは |
-| **第9章** | ユーザーを管理する | 実習 | useradd、passwd、su、sudo、/etc/passwd |
-| **第10章** | グループを管理する | 実習 | groupadd、usermod -aG、/etc/group |
-| **第11章** | パーミッションを理解する | 実習 | chmod、chown、SUID/SGID/Sticky Bit、umask |
-| **第12章** | ネットワーク基礎 | 実習+説明 | IP・サブネット・CIDR、ping、dig、ss |
-| **第13章** | ファイルシステムをマウントする | 実習+説明 | mount、umount、fstab、ループバックデバイス |
-| **第14章** | OS ログを読む・書く | 実習 | rsyslog、journalctl、logger、ログレベル |
-| **第15章** | SystemD でサービスを制御する | 実習+説明 | systemctl、ユニットファイル作成、ターゲット |
-| **第16章** | SELinux・AppArmor の概念を知る | 説明 | MAC vs DAC、AppArmor（Debian）vs SELinux（RHEL） |
-| **第17章** | **Nginx をソースからビルドする** | 実習 | wget、./configure、make install、systemd 登録 |
-| **第18章** | [オプション] OpenSSL 証明書で HTTPS 化する | 実習 | 公開鍵暗号、自己署名証明書、Nginx HTTPS 設定 |
-| **第19章** | **Docker で全部まとめて自動化する** | 実習 | Dockerfile、docker build/run、コンテナ化の価値 |
+| **第1章** | [シェルの種類と選び方](./chapter-01/README.md) | 説明+実習 | bash / zsh / fish の比較、シェルとは何か |
+| **第2章** | [基本コマンドを使いこなす](./chapter-02/README.md) | 実習 | ls, cd, find, grep, ps, df, free ほか30コマンド |
+| **第3章** | [ディレクトリ構成を知る](./chapter-03/README.md) | 説明+実習 | FHS、/etc /var /proc /dev の役割、ディストリ別差異 |
+| **第4章** | [パッケージ管理](./chapter-04/README.md) | 実習 | apt, dpkg、yum/dnf/rpm との比較 |
+| **第5章** | [テキストエディタ3種を使う](./chapter-05/README.md) | 実習 | vi / nano / emacs の基本操作 |
+| **第6章** | [シェル環境をカスタマイズする](./chapter-06/README.md) | 実習 | bashrc、bash_profile、エイリアス、PS1 |
+| **第7章** | [環境変数・入力補完・カラー表示](./chapter-07/README.md) | 実習 | export、Tab 補完、ls/grep のカラー化 |
+| **第8章** | [Locale・Timezone を設定する](./chapter-08/README.md) | 実習+説明 | locale-gen、timedatectl、カーネルとは |
+| **第9章** | [ユーザーを管理する](./chapter-09/README.md) | 実習 | useradd、passwd、su、sudo、/etc/passwd |
+| **第10章** | [グループを管理する](./chapter-10/README.md) | 実習 | groupadd、usermod -aG、/etc/group |
+| **第11章** | [パーミッションを理解する](./chapter-11/README.md) | 実習 | chmod、chown、SUID/SGID/Sticky Bit、umask |
+| **第12章** | [ネットワーク基礎](./chapter-12/README.md) | 実習+説明 | IP・サブネット・CIDR、ping、dig、ss |
+| **第13章** | [ファイルシステムをマウントする](./chapter-13/README.md) | 実習+説明 | mount、umount、fstab、ループバックデバイス |
+| **第14章** | [OS ログを読む・書く](./chapter-14/README.md) | 実習 | rsyslog、journalctl、logger、ログレベル |
+| **第15章** | [サービス管理（SysVinit 実習 + systemd 説明）](./chapter-15/README.md) | 実習+説明 | service コマンド、/etc/init.d/、systemd ユニット概念 |
+| **第16章** | [シェルスクリプトを書く](./chapter-16/README.md) | 実習 | シバン行、変数、条件分岐、ループ、関数 |
+| **第17章** | [cron でタスクを自動化する](./chapter-17/README.md) | 実習 | crontab、/etc/cron.daily/、スケジュール実行 |
+| **第18章** | [logrotate でログを管理する](./chapter-18/README.md) | 実習 | /etc/logrotate.d/nginx、compress、postrotate |
+| **第19章** | [SELinux・AppArmor の概念を知る](./chapter-19/README.md) | 説明 | MAC vs DAC、AppArmor（Debian）vs SELinux（RHEL） |
+| **第20章** | [**Nginx をソースからビルドする**](./chapter-20/README.md) | 実習 | wget、./configure、make install、systemd 登録 |
+| **第21章** | [[オプション] OpenSSL 証明書で HTTPS 化する](./chapter-21/README.md) | 実習 | 公開鍵暗号、自己署名証明書、Nginx HTTPS 設定 |
+| **第22章** | [**Docker で全部まとめて自動化する**](./chapter-22/README.md) | 実習 | Dockerfile、docker build/run、コンテナ化の価値 |
 
 ```mermaid
 flowchart LR
@@ -128,11 +131,14 @@ flowchart LR
     C9 --> C12["第12章\nネットワーク"]
     C11 --> C13["第13章\nマウント"]
     C9 --> C14["第14章\nOSログ"]
-    C14 --> C15["第15章\nSystemD"]
-    C15 --> C16["第16章\nSELinux"]
-    C16 --> C17["第17章\nNginx ビルド"]
-    C17 --> C18["第18章\nHTTPS（任意）"]
-    C17 --> C19["第19章\nDocker"]
+    C14 --> C15["第15章\nサービス管理"]
+    C15 --> C16["第16章\nシェルスクリプト"]
+    C16 --> C17["第17章\ncron"]
+    C17 --> C18["第18章\nlogrotate"]
+    C18 --> C19["第19章\nSELinux"]
+    C19 --> C20["第20章\nNginx ビルド"]
+    C20 --> C21["第21章\nHTTPS（任意）"]
+    C20 --> C22["第22章\nDocker"]
 ```
 
 ---
@@ -147,8 +153,8 @@ flowchart LR
 | **シェル** | bash |
 | **エディタ** | vim（フル版）、nano、emacs-nox |
 | **ログ** | rsyslog、journald |
-| **サービス管理** | systemd |
-| **Nginx** | 学習者が chapter-17 で手動ビルド（事前インストールなし） |
+| **サービス管理** | service（SysVinit 互換）/ systemd（概念説明） |
+| **Nginx** | 学習者が chapter-20 で手動ビルド（事前インストールなし） |
 | **VS Code 拡張** | 日本語言語パック（Microsoft 認証済み）のみ |
 | **転送ポート** | 80（HTTP）、443（HTTPS）、8080（代替） |
 
