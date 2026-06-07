@@ -107,7 +107,7 @@ $ cat /etc/shells
 
 ```bash
 $ bash --version
-GNU bash, version 5.2.37(1)-release (aarch64-unknown-linux-gnu)
+GNU bash, version 5.2.37(1)-release (x86_64-pc-linux-gnu)
 Copyright (C) 2022 Free Software Foundation, Inc.
 License GPLv3+: GNU GPL version 3 or later <http://gnu.org/licenses/gpl.html>
 ...
@@ -149,7 +149,7 @@ $ ls -la /bin/sh
 lrwxrwxrwx 1 root root 4 Feb  4  2025 /bin/sh -> dash
 ```
 
-`/bin/sh` は `dash` へのシンボリックリンク（第3章で詳しく学びます）です。
+`/bin/sh` は `dash` へのシンボリックリンク（**シンボリックリンク**: Windows のショートカット（.lnk ファイル）に相当する「別名でファイルを参照する仕組み」。第3章で詳しく学びます）です。
 
 > **よくある落とし穴:** シェバン行が `#!/bin/bash` で、bash 固有の構文を使ったスクリプトを
 > `sh deploy.sh` で実行するとエラーになります（`sh` は bash 固有機能を知らないため）。
@@ -190,7 +190,7 @@ $ echo $MY_VAR
 **① `./test.sh` — シェバン行で指定したシェルが別プロセスとして実行**
 
 ```bash
-$ chmod +x /tmp/test.sh
+$ chmod +x /tmp/test.sh   # chmod: ファイルのパーミッション（読み書き実行の権限）を変更するコマンド。+x で実行可能にする（詳細は第11章）
 $ cd /tmp
 $ ./test.sh
 実行シェル: ./test.sh
@@ -317,7 +317,7 @@ VS Code でターミナルを開いたとき:
 
 </details>
 
-1. シェルスクリプトの1行目に `#!/bin/bash` と書いた場合と `#!/bin/sh` と書いた場合で、Debian 環境での動作はどう異なりますか？
+2. シェルスクリプトの1行目に `#!/bin/bash` と書いた場合と `#!/bin/sh` と書いた場合で、Debian 環境での動作はどう異なりますか？
 
 <details><summary>答え</summary>
 
@@ -331,7 +331,7 @@ Debian では `/bin/sh` は `dash` へのシンボリックリンク（`ls -la /
 
 </details>
 
-1. `./deploy.sh` と `source deploy.sh` では、スクリプト内で設定した環境変数の扱いが異なります。どう違うか、理由も含めて答えてください。
+3. `./deploy.sh` と `source deploy.sh` では、スクリプト内で設定した環境変数の扱いが異なります。どう違うか、理由も含めて答えてください。
 
 <details><summary>答え</summary>
 
@@ -342,7 +342,7 @@ Debian では `/bin/sh` は `dash` へのシンボリックリンク（`ls -la /
 
 </details>
 
-1. `source ~/.bashrc` はよく使うコマンドです。`bash ~/.bashrc` ではなく `source` を使う理由を答えてください。
+4. `source ~/.bashrc` はよく使うコマンドです。`bash ~/.bashrc` ではなく `source` を使う理由を答えてください。
 
 <details><summary>答え</summary>
 
@@ -355,6 +355,34 @@ Debian では `/bin/sh` は `dash` へのシンボリックリンク（`ls -la /
 `source`（または `. ~/.bashrc`）を使うことで、ターミナルを開き直さずに設定変更を反映できる。
 
 </details>
+
+5. Debian では `/bin/sh` の実体が `dash` になっています。その事実を確認するコマンドを答えてください。また、bash ではなく dash が選ばれている理由を答えてください。
+
+<details><summary>答え</summary>
+
+**確認コマンド:**
+
+```bash
+$ ls -la /bin/sh
+lrwxrwxrwx 1 root root 4 Feb  4  2025 /bin/sh -> dash
+```
+
+シンボリックリンク（→ の右側）が `dash` を指しているので、`/bin/sh` の実体が dash だとわかる。
+
+**bash ではなく dash が選ばれている理由:**
+
+| 観点 | 内容 |
+|:---|:---|
+| 軽量・高速 | dash は bash より起動が速く、OS 起動時に大量に呼ばれる `/etc/init.d/` スクリプトの実行を高速化できる |
+| POSIX 準拠 | dash は POSIX の最小仕様に徹しているため、bash 固有機能への依存を防げる |
+| 安全性 | 機能を絞ることで bash 固有のセキュリティ問題（Shellshock 等）の影響を受けにくい |
+
+このため Debian は「汎用の `/bin/sh`」に bash ではなく dash を採用している。
+スクリプトを `#!/bin/sh` で書くと、bash 固有機能が使えない代わりに、どの Linux でも動く汎用スクリプトになる。
+
+</details>
+
+次章では、ファイルの閲覧・検索・テキスト操作など、Linux で毎日使う基本コマンドを体系的に学びます。
 
 ---
 

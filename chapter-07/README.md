@@ -104,6 +104,7 @@ TERM=xterm-256color
 > **Codespaces 環境では変数が多数表示される**
 > `env` を実行すると `VSCODE_ESM_ENTRYPOINT`・`SSH_AUTH_SOCK` など Codespaces やツールの内部変数が大量に表示されます。
 > 確認したい変数が埋もれてしまうため、実際の作業では `env | grep` で絞り込むのが実用的です。
+> `|`（パイプ）は第2章で学んだ「左のコマンドの出力を右のコマンドの入力に渡す」仕組みです。
 
 ```bash
 $ env | grep PATH
@@ -171,7 +172,7 @@ $ which nginx
 
 `which` は PATH を順番に検索してコマンドを探します。
 現時点では `/usr/local/nginx/sbin/` ディレクトリ自体が存在しないため何も返りませんが、
-第17章でソースビルドを完了すると、このパスに `nginx` の実行ファイルが配置され、自動的に `nginx` コマンドが使えるようになります。
+第20章でソースビルドを完了すると、このパスに `nginx` の実行ファイルが配置され、自動的に `nginx` コマンドが使えるようになります。
 
 ---
 
@@ -341,6 +342,7 @@ $ diff /etc/hosts /etc/hostname
 #### ANSI エスケープコードの仕組み
 
 `ls --color` や PS1 の色指定で使った `\e[32m` は **ANSI エスケープコード**と呼ばれます。
+ANSI（American National Standards Institute）が定めた端末制御の規格で、Windows ターミナルや macOS の Terminal.app でも同じコードが使えます。
 
 ```text
 \e  [  32  m
@@ -514,6 +516,8 @@ Display all 1162 possibilities? (y or n)
 </details>
 
 ---
+
+次章では、この章で登場した `LANG` 環境変数の仕組みを使い、ロケール（文字コード・言語設定）とタイムゾーンを正しく設定する方法を学びます。
 
 | [← 第6章: シェル環境をカスタマイズする](../chapter-06/README.md) | [全章目次](../README.md) | [第8章: Locale・Timezone を設定する →](../chapter-08/README.md) |
 |:---|:---:|---:|
