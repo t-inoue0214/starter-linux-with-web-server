@@ -259,7 +259,7 @@ n          → 次の検索結果へ
 
 > **今は内容を理解できなくて OK**
 > `worker_processes`・`events`・`http` ブロックなど、設定の意味は第9〜15章を通じて少しずつわかってきます。
-> 第20章ではソースビルド後の `/usr/local/nginx/conf/nginx.conf` を実際に編集します。
+> 第19章ではソースビルド後の `/usr/local/nginx/conf/nginx.conf` を実際に編集します。
 
 ---
 

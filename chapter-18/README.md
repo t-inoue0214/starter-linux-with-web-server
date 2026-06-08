@@ -512,9 +512,9 @@ logrotate 自体は `sudo` で root として実行されるため、
 
 </details>
 
-次章では、Linux のセキュリティ強化機構である SELinux・AppArmor の概念と、Codespaces（Debian）で有効な AppArmor のプロファイル確認方法を学びます。
+次章では、ここまで動かしてきた nginx を削除し、ソースコードからビルドして apt インストールとの全工程を比較します。
 
 ---
 
-| [← 第17章: cron でタスクを自動化する](../chapter-17/README.md) | [全章目次](../README.md) | [第19章: SELinux・AppArmor の概念を知る →](../chapter-19/README.md) |
+| [← 第17章: cron でタスクを自動化する](../chapter-17/README.md) | [全章目次](../README.md) | [第19章: Nginx をソースからビルドする →](../chapter-19/README.md) |
 |:---|:---:|---:|

@@ -1,514 +1,511 @@
-# 第19章: SELinux・AppArmor の概念を知る
+# 第19章: Nginx をソースからビルドする
 
 ## 前提知識
 
-この章を始める前に、以下の章を完了していること:
-
-- 第11章: パーミッションを管理する（DAC の基礎 — `chmod`/`chown` を理解している）
-- 第15章: systemd でサービスを管理する（サービスプロセスの概念を理解している）
+- 第4章: パッケージ管理（`apt install nginx` を実行した。この章でその全工程を手動で再現する）
+- 第10章: プロセスを管理する（`make` の並列コンパイルなどに活用できる）
+- 第11章: パーミッションを管理する（`sudo` の使い方・インストール先の権限）
+- 第15章: systemd でサービスを管理する（`service` コマンドとの違いを理解している）
+- 第11章: パーミッションを理解する（コラム: DAC の限界と強制アクセス制御（MAC）の基礎知識）
 
 ## 概要
 
-第11章で学んだ `chmod`/`chown` によるパーミッション管理（DAC）は、
-ファイルの所有者が自由にアクセス権を設定できる仕組みだ。
-しかし DAC には「root には制限がかけられない」という根本的な限界がある。
+第4章で実行した `apt install nginx` は、以下の工程をすべて自動で処理していた。
 
-この章では DAC を超えた「強制アクセス制御（MAC）」の概念を学ぶ。
-業務で広く使われる **RHEL 系の SELinux** を主軸に、
-Debian/Codespaces 環境での **AppArmor** も合わせて確認する。
+1. ソースコードのダウンロード
+2. コンパイル（Debian のビルドサーバーで事前に完了済み）
+3. 依存ライブラリの解決と配置
+4. バイナリ・設定ファイル・ログディレクトリの設置
+5. systemd サービスファイルの登録
+6. AppArmor プロファイルの生成
+
+この章では `apt purge nginx` でいったん削除し、上記すべての工程を手動で再現する。
+`apt` が隠していた工程を体験することで、Linux でソフトウェアが動く仕組みを理解する。
 
 ## 手順
 
-### 19-1. DAC の限界 — プロセス侵害のリスク
+### 19-1. apt purge で nginx を削除する
 
-第11章で学んだ DAC（任意アクセス制御）をおさらいする。
+第4章からずっと使ってきた nginx を完全に削除する。
+目的は「削除すること」ではなく、「ゼロから再現するための準備」だ。
 
-**通常の nginx の動作（DAC のみ）:**
-
-nginx プロセスは `www-data` ユーザーとして動作している。
-
-```text
-$ ps aux | grep nginx
-www-data   123  0.0  ...  /usr/sbin/nginx -g daemon on; ...
-```
-
-> **注:** 本コマンドは nginx 起動中の出力例だ。Codespaces での nginx 起動方法は
-> 第15章で確認した `sudo service nginx start` を使う。
-
-`www-data` が読み書きできるファイルは、DAC（`chmod`/`chown`）で制御されている。
-これは正常な状態では問題ない。
-
-**nginx のプロセスが乗っ取られた場合:**
-
-```text
-【DAC のみの環境で nginx が攻撃者に侵害された場合】
-
-攻撃者は www-data としてコマンドを実行できる。
-
-www-data でできること（DACのみ）:
-  /var/log/nginx/ への書き込み    → ○（設計通り）
-  /etc/nginx/nginx.conf の読み取り → ○（設定ファイル）
-  /etc/passwd の読み取り           → ○（誰でも読めるファイル）
-  /tmp に実行ファイルを作成・実行  → ○（条件次第）
-
-→ DAC は「正常な権限の範囲内」でしか保護できない
-```
-
-DAC は「正当なユーザーが誤操作しないよう守る」仕組みだ。
-「プロセスが乗っ取られた場合の被害を最小化する」には、別の仕組みが必要になる。
-
-### 19-2. MAC とは — 強制アクセス制御とその価値
-
-**MAC（Mandatory Access Control）** は、
-システム管理者がポリシーを定義し、プロセスが許可された操作のみを実行できるよう強制する仕組みだ。
-
-| 比較軸 | DAC（任意アクセス制御） | MAC（強制アクセス制御） |
-|:---|:---|:---|
-| 正式名称 | Discretionary Access Control | Mandatory Access Control |
-| 制御主体 | ファイルの所有者 | システムポリシー（管理者が定義） |
-| root の制約 | ない（root は何でもできる） | プロセスのコンテキストで縛れる |
-| 設定方法 | `chmod`・`chown` | SELinux / AppArmor のポリシー |
-| 主な用途 | 一般的なファイル保護 | サーバーの重要プロセス保護 |
-
-**MAC がある環境で nginx が侵害された場合:**
-
-```text
-【MAC（SELinux）がある環境で nginx が侵害された場合】
-
-攻撃者は www-data かつ httpd_t コンテキストとして動く。
-
-httpd_t コンテキストで許可されていること:
-  /var/log/nginx/*.log への書き込み → ○（ポリシーで許可）
-  /var/www/html/ の読み取り         → ○（ポリシーで許可）
-
-httpd_t コンテキストで拒否されること:
-  /etc/shadow の読み取り → ✗（MAC がブロック）
-  外部への任意接続       → ✗（ポリシー次第でブロック）
-  /tmp への実行ファイル作成 → ✗（ポリシー次第でブロック）
-
-→ プロセスが侵害されても、MAC が被害を最小化する
-```
-
-**「root がポリシーファイルを変更できるのでは？」**
-
-その通りだ。MAC は「完全無敵の防御」ではない。
-MAC の本当の価値は「**プロセス侵害の被害範囲を最小化する**」点にある。
-
-ポリシーファイルの変更には root 権限が必要だが、変更はすべて監査ログに記録される。
-
-```text
-監査ログの場所: /var/log/audit/audit.log（RHEL 系）
-
-→ 「誰がいつポリシーを変更したか」が追跡できる
-→ 不正な変更を検出しやすい
-```
-
-「nginx を侵害し root を取得してポリシーを変更する」という段階的な攻撃には、
-より根本的な root 権限管理（sudo の制限・SSH 鍵管理など）で対応する。
-
-### 19-3. SELinux の仕組みを知る（RHEL 系）
-
-業務で RHEL/CentOS/AlmaLinux を使う場合、MAC の実装は **SELinux** だ。
-
-#### SELinux コンテキスト
-
-SELinux はすべてのリソース（ファイル・プロセス）に「**コンテキスト（セキュリティラベル）**」を付ける。
-コンテキストは `ユーザー:ロール:タイプ:レベル` の形式で表される。
-
-```text
-# RHEL/CentOS での確認コマンド（参照用）
-$ ls -Z /var/log/nginx/
-system_u:object_r:httpd_log_t:s0 access.log
-system_u:object_r:httpd_log_t:s0 error.log
-
-$ ps -Z | grep nginx
-system_u:system_r:httpd_t:s0  nginx
-```
-
-SELinux で最も重要なのは「**タイプ**」の部分だ。
-
-```text
-httpd_t   → nginx などの Web サーバープロセスに付くタイプ
-httpd_log_t → Web サーバーのログファイルに付くタイプ
-shadow_t  → /etc/shadow に付くタイプ
-
-ポリシー例:
-  httpd_t は httpd_log_t に書き込める   → ○ ログ書き込みを許可
-  httpd_t は shadow_t を読み取れない    → ✗ /etc/shadow を保護
-```
-
-#### SELinux モード
-
-| モード | コマンド | 動作 | 使いどころ |
-|:---|:---|:---|:---|
-| `enforcing` | `sudo setenforce 1` | ポリシー違反を拒否する | 本番環境 |
-| `permissive` | `sudo setenforce 0` | 拒否せずログに記録する | 設定調整中 |
-| `disabled` | `/etc/selinux/config` 変更後にリブート | SELinux が機能しない | （非推奨） |
-
-#### SELinux 主要コマンド（RHEL 系・参照用）
-
-```text
-# SELinux の現在の状態を確認
-$ getenforce
-Enforcing
-
-# 詳細な状態を確認
-$ sestatus
-SELinux status:                 enabled
-SELinuxfs mount:                /sys/fs/selinux
-Loaded policy name:             targeted
-Current mode:                   enforcing
-Mode from config file:          enforcing
-
-# ファイルのコンテキストを確認（-Z オプション）
-$ ls -Z /var/www/html/
-unconfined_u:object_r:httpd_sys_content_t:s0 index.html
-
-# コンテキストを変更（一時的）
-$ sudo chcon -t httpd_sys_content_t /data/www/index.html
-
-# デフォルトのコンテキストに戻す
-$ sudo restorecon -v /data/www/index.html
-
-# デフォルトのコンテキストを永続的に定義
-$ sudo semanage fcontext -a -t httpd_sys_content_t "/data/www(/.*)?"
-$ sudo restorecon -Rv /data/www/
-```
-
-#### RHEL + nginx でよくある SELinux トラブル
-
-**ケース1: nginx を標準以外のポートで起動しようとする**
-
-nginx の設定で `listen 8888;` と書いて起動すると、`enforcing` モードでは失敗する場合がある。
-
-```text
-# 症状
-$ sudo systemctl start nginx
-Job for nginx.service failed.
-
-# 原因の確認（audit ログ）
-$ sudo grep nginx /var/log/audit/audit.log | grep denied
-type=AVC ... avc: denied { name_bind } ...
-              tcontext=system_u:object_r:unreserved_port_t:s0
-
-# 対処: SELinux に 8888 番ポートを nginx が使ってよいと許可する
-$ sudo semanage port -a -t http_port_t -p tcp 8888
-$ sudo systemctl start nginx  # 再起動
-```
-
-**ケース2: nginx のドキュメントルートを変更した場合**
-
-`/data/www/` を nginx のドキュメントルートに設定すると、デフォルトのコンテキストは
-`httpd_sys_content_t` ではないため、403 Forbidden エラーを返す可能性がある。
-
-```text
-# 症状: ブラウザで 403 Forbidden
-
-# 原因: /data/www/ のコンテキストが httpd_sys_content_t でない
-$ ls -Z /data/www/
-unconfined_u:object_r:default_t:s0 index.html  ← default_t は nginx からアクセス不可
-
-# 対処: コンテキストを付与する
-$ sudo semanage fcontext -a -t httpd_sys_content_t "/data/www(/.*)?"
-$ sudo restorecon -Rv /data/www/
-$ ls -Z /data/www/
-unconfined_u:object_r:httpd_sys_content_t:s0 index.html  ← 修正完了
-```
-
-> **覚えておく鉄則:** RHEL 系で nginx が突然 403 を返したときは、
-> まず SELinux のコンテキストを疑え。`ls -Z` でコンテキストを確認し、
-> `restorecon` で修正するのが定石だ。
-
-### 19-4. Codespaces で AppArmor を確認する（Debian 系）
-
-Debian/Ubuntu 系の Linux では、MAC の実装として **AppArmor** が使われる。
-SELinux がコンテキスト（タイプ）で制御するのに対し、
-AppArmor は**プログラムのパス**ベースでポリシーを定義する。
-
-#### ライブラリの確認
-
-Codespaces でインストール済みのパッケージを確認する。
+現在の nginx を確認する。
 
 ```bash
-$ dpkg -l | grep -E "apparmor|selinux"
+$ nginx -v
+nginx version: nginx/1.26.3
+
+$ which nginx
+/usr/sbin/nginx
+```
+
+nginx と関連パッケージを削除する。`apt remove` は設定ファイルを残すが、`apt purge` は `/etc/nginx/` ごと完全に削除する。
+
+```bash
+$ sudo apt purge -y nginx nginx-common
+$ sudo apt autoremove -y
 ```
 
 出力例:
 
 ```text
-ii  libapparmor1:amd64  4.1.0-1  amd64  changehat AppArmor library
-ii  libselinux1:amd64   3.8.1-1  amd64  SELinux runtime shared libraries
+Reading package lists... Done
+Building dependency tree... Done
+Reading state information... Done
+The following packages will be REMOVED:
+  nginx* nginx-common*
+0 upgraded, 0 newly installed, 2 to remove and 37 not upgraded.
+After this operation, 1085 kB disk space will be freed.
+Removing nginx (1.26.3-3+deb13u5) ...
+Purging configuration files for nginx (1.26.3-3+deb13u5) ...
+Removing nginx-common (1.26.3-3+deb13u5) ...
+Purging configuration files for nginx-common (1.26.3-3+deb13u5) ...
+Processing triggers for man-db (2.12.1-3) ...
 ```
 
-ライブラリはインストールされているが、カーネルモジュールは未ロードの状態だ。
-
-#### AppArmor プロファイルディレクトリの確認
+削除できたか確認する。
 
 ```bash
-$ ls /etc/apparmor.d/
+$ nginx -v
+bash: nginx: command not found
+
+$ which nginx
+（出力なし）
+
+$ ls /etc/nginx/
+ls: cannot access '/etc/nginx/': No such file or directory
+```
+
+apt が配置していたファイルがすべて消えた。次のセクションからソースで再現する。
+
+### 19-2. ビルド依存パッケージを確認する
+
+`apt install nginx` は依存ライブラリを自動で解決していた。ソースビルドでは自分で把握してインストールする必要がある。
+
+```bash
+$ sudo apt install -y build-essential libpcre2-dev libssl-dev zlib1g-dev
+```
+
+インストール済みか確認する。
+
+```bash
+$ dpkg -l | grep -E "build-essential|libpcre2-dev|libssl-dev|zlib1g-dev"
 ```
 
 出力例:
 
 ```text
-local  usr.bin.man
+ii  build-essential       12.12               amd64  Informational list of build-essential packages
+ii  libpcre2-dev:amd64    10.46-1~deb13u1     amd64  New Perl Compatible Regular Expressions Library
+ii  libssl-dev:amd64      3.5.6-1~deb13u1     amd64  Secure Sockets Layer toolkit - development files
+ii  zlib1g-dev:amd64      1:1.3.dfsg+...+b1   amd64  compression library - development
 ```
 
-```bash
-$ ls /etc/apparmor.d/local/
-```
-
-出力例:
-
-```text
-usr.bin.man
-```
-
-`/etc/apparmor.d/` が AppArmor の設定ディレクトリ（SELinux でいうポリシーの保存場所）だ。
-`local/` 内のファイルはサイト固有のカスタマイズを追記するための空ファイルだ。
-
-#### AppArmor カーネルモジュールの確認
-
-```bash
-$ ls /sys/kernel/security/
-```
-
-出力なし（カーネルモジュールが未ロードのため空）。
-
-> **[コンテナ制限] Codespaces 環境での注意**
-> GitHub Codespaces は Docker コンテナ内で動作しているため、
-> AppArmor カーネルモジュールが無効になっています。
-> `aa-status` コマンドも未インストールです。
-> 本章では実際のプロファイルファイルを読み解くことで AppArmor の仕組みを理解します。
-
-#### 実際のプロファイルを読む
-
-```bash
-$ cat /etc/apparmor.d/usr.bin.man
-```
-
-出力例（主要部分・注釈付き。実際のファイルは 80 行以上ある）:
-
-```text
-# vim:syntax=apparmor
-
-#include <tunables/global>
-
-/usr/bin/man {
-  #include <abstractions/base>
-
-  # man が groff 系ツールを呼ぶときは専用プロファイルを使う
-  /usr/bin/troff rmCx -> &man_groff,
-  /usr/bin/tbl   rmCx -> &man_groff,
-
-  # man が解凍ツールを呼ぶときは専用プロファイルを使う
-  /{,usr/}bin/gzip rmCx -> &man_filter,
-  /{,usr/}bin/bzip2 rmCx -> &man_filter,
-
-  # man 自体はファイルシステムへのアクセスを広く許可
-  /** mrixwlk,
-
-  deny capability dac_override,       # この能力を使おうとしても拒否
-  deny capability dac_read_search,
-
-  signal peer=@{profile_name},
-
-  #include <local/usr.bin.man>        # ローカルカスタマイズを読み込む
-}
-
-profile man_groff {
-  #include <abstractions/base>
-  /usr/bin/troff rm,
-  /usr/share/groff/** r,
-  /tmp/groff* rw,
-}
-
-profile man_filter {
-  #include <abstractions/base>
-  /** r,
-  /var/cache/man/** w,
-}
-```
-
-**プロファイルの主要な構文:**
-
-| 記法 | 意味 |
+| パッケージ | 役割 |
 |:---|:---|
-| `#include <abstractions/base>` | 共通の基本権限セットを取り込む |
-| `/path/to/file r,` | ファイルの読み取りを許可 |
-| `/path/to/file rw,` | ファイルの読み書きを許可 |
-| `/path/to/file mr,` | メモリマップ読み取りを許可（共有ライブラリ等） |
-| `/path/** r,` | ディレクトリ以下すべてを読み取り可能 |
-| `rmCx -> &man_groff,` | 子プロセスを `man_groff` プロファイルで実行 |
-| `deny capability dac_override,` | 特定のカーネル能力（Capability）を明示的に拒否 |
+| `build-essential` | `gcc`・`make` などのコンパイラ一式 |
+| `libpcre2-dev` | nginx の URL パターンマッチ（正規表現）に使用 |
+| `libssl-dev` | HTTPS（SSL/TLS）に必要 |
+| `zlib1g-dev` | HTTP レスポンスの gzip 圧縮に使用 |
 
-### 19-5. SELinux vs AppArmor — どちらを覚えるべきか
+> `apt install nginx` はこれらを依存関係として自動でインストールしていた。
+> ソースビルドでは自分で明示的にインストールする必要がある。
 
-| 項目 | SELinux | AppArmor |
+### 19-3. ソースコードを取得する
+
+nginx.org からソースコードの tarball（圧縮アーカイブ）をダウンロードする。
+
+#### バージョンの確認
+
+nginx.org には「Mainline version」（最新開発版）と「Stable version」（安定版）がある。
+本番環境では Stable version を使うのが基本だ。
+
+```bash
+$ curl -s https://nginx.org/en/download.html | grep -oP 'nginx-\d+\.\d+\.\d+\.tar\.gz' | head -3
+```
+
+出力例:
+
+```text
+nginx-1.31.1.tar.gz
+nginx-1.30.2.tar.gz
+nginx-1.28.3.tar.gz
+```
+
+1 番目が Mainline version（奇数のマイナーバージョン: 1.31）、2 番目が Stable version（偶数のマイナーバージョン: 1.30）だ。
+この章では Stable version の `nginx-1.30.2` を使う。
+
+#### ダウンロードと展開
+
+作業ディレクトリを作成してダウンロードする。
+
+```bash
+$ mkdir ~/nginx-build && cd ~/nginx-build
+$ wget https://nginx.org/download/nginx-1.30.2.tar.gz
+```
+
+出力例:
+
+```text
+--2026-06-07 09:40:00--  https://nginx.org/download/nginx-1.30.2.tar.gz
+Resolving nginx.org... 3.125.197.172
+Connecting to nginx.org|3.125.197.172|:443... connected.
+HTTP request sent, awaiting response... 200 OK
+Length: 1350729 (1.3M) [application/octet-stream]
+Saving to: 'nginx-1.30.2.tar.gz'
+nginx-1.30.2.tar.gz  100%[=========>]  1.29M  1.82MB/s  in 0.7s
+'nginx-1.30.2.tar.gz' saved (1350729 bytes)
+```
+
+tarball を展開してソースツリーを確認する。
+
+```bash
+$ tar xzf nginx-1.30.2.tar.gz
+$ cd nginx-1.30.2
+$ ls
+```
+
+出力例:
+
+```text
+CHANGES  CHANGES.ru  CODE_OF_CONDUCT.md  CONTRIBUTING.md  LICENSE
+README.md  SECURITY.md  SUPPORT.md  auto  conf  configure  contrib  html  man  src
+```
+
+`configure` スクリプトと `src/`（ソースコード本体）が確認できる。
+
+### 19-4. `./configure` でビルドオプションを設定する
+
+`configure` スクリプトはビルドの「設計図」となる `Makefile` を生成するツールだ。
+インストール先とモジュールの選択をここで決める。
+
+```bash
+$ ./configure \
+    --prefix=/usr/local/nginx \
+    --with-http_ssl_module \
+    --with-http_v2_module \
+    --with-pcre
+```
+
+出力例（要約部分）:
+
+```text
+checking for OS
+ + Linux 6.8.0-1052-azure x86_64
+checking for C compiler ... found
+ + using GNU C compiler
+ + gcc version: 14.2.0 (Debian 14.2.0-19)
+...
+Configuration summary
+  + using system PCRE2 library
+  + using system OpenSSL library
+  + using system zlib library
+
+  nginx path prefix: "/usr/local/nginx"
+  nginx binary file: "/usr/local/nginx/sbin/nginx"
+  nginx configuration file: "/usr/local/nginx/conf/nginx.conf"
+  nginx pid file: "/usr/local/nginx/logs/nginx.pid"
+  nginx error log file: "/usr/local/nginx/logs/error.log"
+  nginx http access log file: "/usr/local/nginx/logs/access.log"
+```
+
+| オプション | 意味 |
+|:---|:---|
+| `--prefix=/usr/local/nginx` | インストール先（apt は `/usr/sbin/nginx` だったが、ここに集約される） |
+| `--with-http_ssl_module` | HTTPS（SSL/TLS）対応 |
+| `--with-http_v2_module` | HTTP/2 対応 |
+| `--with-pcre` | PCRE 正規表現ライブラリを使用 |
+
+configure が完了すると `Makefile` が生成される。
+
+```bash
+$ ls Makefile
+Makefile
+```
+
+> **対比ポイント:** `apt install nginx` のモジュール構成は Debian パッケージが決めていた。
+> ソースビルドでは `--with-stream`（TCP プロキシ）の追加や不要モジュールの除外を自由に選択できる。
+
+### 19-5. `make` でコンパイルし `make install` でインストールする
+
+#### コンパイル（`make`）
+
+ソースコードをバイナリに変換する。数分かかるので待つ。
+
+```bash
+$ make
+```
+
+出力例（最初と最後の部分）:
+
+```text
+make -f objs/Makefile
+make[1]: Entering directory '/home/vscode/nginx-build/nginx-1.30.2'
+cc -c -pipe  -O -W -Wall -Wpointer-arith -Wno-unused-parameter ...
+    src/core/nginx.c
+...
+cc -pipe  -O -W ... objs/nginx
+make[1]: Leaving directory '/home/vscode/nginx-build/nginx-1.30.2'
+```
+
+> この `make` の数分が、`apt install nginx` では見えなかった工程だ。
+> Debian のビルドサーバーが事前にコンパイルし、パッケージに含めて配布していた。
+
+#### インストール（`sudo make install`）
+
+コンパイルしたバイナリを `/usr/local/nginx/` に配置する。root 権限が必要だ。
+
+```bash
+$ sudo make install
+```
+
+出力例:
+
+```text
+make -f objs/Makefile install
+make[1]: Entering directory '/home/vscode/nginx-build/nginx-1.30.2'
+test -d '/usr/local/nginx' || mkdir -p '/usr/local/nginx'
+install -m755 objs/nginx '/usr/local/nginx/sbin/nginx'
+install -m644 conf/nginx.conf '/usr/local/nginx/conf/nginx.conf'
+cp conf/nginx.conf '/usr/local/nginx/conf/nginx.conf.default'
+test -d '/usr/local/nginx/logs' || mkdir -p '/usr/local/nginx/logs'
+test -d '/usr/local/nginx/html' || cp -R html '/usr/local/nginx'
+make[1]: Leaving directory '/home/vscode/nginx-build/nginx-1.30.2'
+```
+
+インストール先を確認する。
+
+```bash
+$ ls /usr/local/nginx/
+conf  html  logs  sbin
+
+$ ls /usr/local/nginx/sbin/
+nginx
+
+$ /usr/local/nginx/sbin/nginx -v
+nginx version: nginx/1.30.2
+```
+
+### 19-6. ソースビルド nginx を起動して動作確認する
+
+#### 起動
+
+apt でインストールしたときは `/usr/sbin/nginx` だったが、ソースビルドでは `/usr/local/nginx/sbin/nginx` のフルパスで起動する。ポート 80 をバインドするために `sudo` が必要だ。
+
+```bash
+$ sudo /usr/local/nginx/sbin/nginx
+```
+
+#### プロセス確認
+
+```bash
+$ ps aux | grep nginx | grep -v grep
+```
+
+出力例:
+
+```text
+root    8683  0.0  0.0  13364  2584 ?  Ss  09:56  0:00 nginx: master process /usr/local/nginx/sbin/nginx
+nobody  8684  0.0  0.0  15160  4700 ?  S   09:56  0:00 nginx: worker process
+```
+
+> **apt nginx との違い:** ワーカープロセスが `www-data` ではなく `nobody` で動作している。
+> ソースビルドのデフォルト設定（`/usr/local/nginx/conf/nginx.conf`）では `user` ディレクティブがコメントアウトされており、`nobody` がデフォルトになる。
+> 本番環境では `user www-data;` のように変更して運用する。
+
+#### ポート確認
+
+```bash
+$ ss -tlnp | grep :80
+```
+
+出力例:
+
+```text
+LISTEN 0  511  0.0.0.0:80  0.0.0.0:*
+```
+
+#### HTTP での動作確認
+
+```bash
+$ curl -s http://localhost/ | head -8
+```
+
+出力例:
+
+```text
+<!DOCTYPE html>
+<html>
+<head>
+<title>Welcome to nginx!</title>
+<style>
+html { color-scheme: light dark; }
+body { width: 35em; margin: 0 auto;
+```
+
+VS Code の「ポート」タブまたはブラウザで `http://localhost/` を開くと「Welcome to nginx!」ページが表示される。
+
+#### ログの確認
+
+```bash
+$ ls /usr/local/nginx/logs/
+access.log  error.log  nginx.pid
+
+$ cat /usr/local/nginx/logs/access.log
+127.0.0.1 - - [07/Jun/2026:09:56:16 +0000] "GET / HTTP/1.1" 200 896 "-" "curl/8.14.1"
+```
+
+> **ログ場所の違い:** apt nginx は `/var/log/nginx/`（システム標準パス）に配置していた。
+> ソースビルドは `--prefix=/usr/local/nginx` で指定した場所の `logs/` に集約される。
+
+> **[コンテナ制限] systemd へのサービス登録について**
+> GitHub Codespaces は Docker コンテナ内で動作しているため `systemctl enable nginx` は使用できない。本章では `sudo /usr/local/nginx/sbin/nginx` での直接起動を使用する。実際の RHEL/Ubuntu サーバーでは nginx.service ユニットファイルを作成して `systemctl` で管理する。
+
+参考として、本番サーバーで使用するユニットファイルの例を示す。
+
+```text
+# /etc/systemd/system/nginx.service（参照用）
+[Unit]
+Description=The NGINX HTTP Server (source build)
+After=network.target
+
+[Service]
+Type=forking
+PIDFile=/usr/local/nginx/logs/nginx.pid
+ExecStartPre=/usr/local/nginx/sbin/nginx -t
+ExecStart=/usr/local/nginx/sbin/nginx
+ExecReload=/bin/kill -s HUP $MAINPID
+ExecStop=/bin/kill -s QUIT $MAINPID
+
+[Install]
+WantedBy=multi-user.target
+```
+
+> **ユニットファイル内のシグナルと変数について:**
+> `$MAINPID` は systemd がサービス起動時に自動でセットする変数で、マスタープロセスの PID（プロセス番号）を保持する。シェルスクリプトの変数と同じ記法だが、systemd 専用の仕組みだ。
+> `HUP`（SIGHUP）は「設定ファイルを再読み込みせよ」というシグナルで、第18章の `USR1`（ログ再オープン）とは用途が異なる。
+> `QUIT` は「現在処理中のリクエストを完了してから止まれ（graceful stop: グレースフルストップ）」というシグナルだ。
+
+### 19-7. apt install との違いを整理する
+
+#### apt install との比較
+
+| 比較軸 | apt install nginx | ソースビルド |
 |:---|:---|:---|
-| 主な採用ディストリビューション | RHEL, CentOS, Fedora, AlmaLinux | Debian, Ubuntu |
-| 制御の単位 | セキュリティコンテキスト（タイプ） | プログラムのパス |
-| 設定の難易度 | 高（全リソースにラベルが必要） | 中（パスベースで直感的） |
-| モード | `enforcing` / `permissive` / `disabled` | `enforce` / `complain` / `disabled` |
-| 主要コマンド | `getenforce`, `sestatus`, `ls -Z`, `chcon`, `semanage` | `aa-status`, `aa-enforce`, `aa-complain` |
-| LPIC-1 出題 | 出題あり（概念として） | 出題あり（概念として） |
+| バイナリの場所 | `/usr/sbin/nginx` | `/usr/local/nginx/sbin/nginx` |
+| 設定ファイル | `/etc/nginx/nginx.conf` | `/usr/local/nginx/conf/nginx.conf` |
+| ログの場所 | `/var/log/nginx/` | `/usr/local/nginx/logs/` |
+| ワーカーユーザー | `www-data` | `nobody`（デフォルト設定のまま） |
+| モジュール選択 | Debian パッケージが決定済み | `./configure` オプションで選択可能 |
+| バージョン指定 | Debian リポジトリの最新 | nginx.org から任意バージョンを選択可能 |
+| 依存関係解決 | 自動（apt が処理） | 手動（`libpcre2-dev` などを自分でインストール） |
+| systemd 登録 | 自動（パッケージに含まれる） | 手動（ユニットファイルを自分で作成） |
+| AppArmor プロファイル | `/etc/apparmor.d/usr.sbin.nginx` が自動生成 | プロファイルなし（第11章コラムで解説した MAC の保護なし） |
 
-**どちらを優先するか:**
+#### ソースビルドのメリット・デメリット
 
-- 業務で **RHEL/CentOS を使うなら SELinux を優先**して習得する
-- Debian/Ubuntu が中心なら AppArmor を習得する
-- 「MAC の概念（コンテキスト・モード・ポリシー）」は両者に共通しているため、
-  一方を理解すればもう一方も習得しやすい
+| | 内容 | 具体例 |
+|:---|:---|:---|
+| **メリット** | バージョンを自由に選べる | Debian リポジトリが 1.26 でも、nginx.org から 1.30 をビルドできる |
+| | モジュールを選択できる | `--with-stream` で TCP プロキシ追加、不要モジュールを除外してバイナリ軽量化 |
+| | カスタムパッチを当てられる | 自社向け改修や OSS パッチを適用したバイナリを作れる |
+| | 最新バージョンをすぐ使える | セキュリティパッチ公開の翌日にビルド・適用できる |
+| **デメリット** | 更新を自分で管理しなければならない | `apt upgrade` だけではセキュリティパッチが当たらない |
+| | AppArmor プロファイルが自動生成されない | 第11章のコラムで学んだ MAC の保護が受けられない |
+| | 再ビルドに時間がかかる | バージョンアップのたびに `make` の数分が必要 |
 
-### 19-6. chapter-20 への橋渡し
-
-この章で学んだ MAC の知識は、次の chapter-20（Nginx ソースビルド）で具体的な意味を持つ。
-
-**ソースビルド nginx と MAC の問題:**
-
-```text
-apt でインストールした nginx:
-  パス: /usr/sbin/nginx
-  Ubuntu では AppArmor プロファイルが /etc/apparmor.d/usr.sbin.nginx に存在する
-  RHEL では SELinux の httpd_t コンテキストが自動的に付与される
-
-chapter-20 でソースビルドする nginx:
-  パス: /usr/local/nginx/sbin/nginx
-  AppArmor プロファイル → 存在しない（MAC の保護なし）
-  SELinux コンテキスト  → デフォルトのまま（httpd_t として認識されないことも）
-```
-
-ソースビルドは柔軟性が高い一方で、「パッケージが自動で設定してくれるセキュリティ設定」を
-自分で用意しなければならない。
-
-**Docker との比較（chapter-22 への伏線）:**
-
-```text
-MAC（SELinux/AppArmor）:
-  プロセス単位でポリシーを手動定義する
-  → 新しいプログラムを導入するたびにポリシーを書く必要がある
-
-Docker:
-  コンテナ単位で自動的にセキュリティ境界を設定する
-  → Linux Namespace（プロセスから見えるリソースを隔離する仕組み）・
-     cgroups（CPU・メモリの使用量を制限するカーネル機能）・
-     seccomp（プロセスが呼び出せるシステムコールを制限するカーネル機能）が自動で隔離してくれる
-  → デフォルトで seccomp プロファイルと AppArmor プロファイルを自動適用
-```
-
-「なぜコンテナが『安全な実行環境』として普及したのか」—
-その答えの一端が、ここで見えてくる。
+> **chapter-21 への伏線:** Docker はコンテナ単位でバージョン・モジュール・セキュリティ設定をパッケージングできる。
+> 「ソースビルドの自由度」を持ちながら「管理コストの高さ」を解消するのがコンテナの価値だ。
 
 ## よくあるミス
 
-| ミス | 症状 | 対処 |
+| ミス | エラーメッセージ例 | 正しい対処 |
 |:---|:---|:---|
-| RHEL で `aa-status` を実行 | `command not found` エラー | RHEL は SELinux。`getenforce` を使う |
-| `enforcing` モードで設定ミス | nginx が突然起動しなくなる | `permissive` モードで確認後に `enforcing` に戻す |
-| ドキュメントルート変更後に SELinux コンテキストを忘れる | 403 Forbidden が返る | `semanage fcontext` + `restorecon` でコンテキストを付与する |
-| SELinux を `disabled` にして放置 | MAC の保護がなくなる。再有効化にはリブートが必要 | 本番環境では `enforcing` を維持し `permissive` で調整する |
-| `chcon` で変更後に `restorecon` を実行 | コンテキストが元に戻る | `semanage fcontext` で永続定義してから `restorecon` を実行する |
+| `configure` 前に依存パッケージが未インストール | `./configure: error: SSL modules require the OpenSSL library.` | `sudo apt install libssl-dev` を実行してから再試行する |
+| `make install` を `sudo` なしで実行 | `install: cannot create regular file '/usr/local/nginx/sbin/nginx': Permission denied` | `sudo make install` で実行する |
+| ポート 80 を `sudo` なしで起動しようとする | `nginx: [emerg] bind() to 0.0.0.0:80 failed (13: Permission denied)` | `sudo /usr/local/nginx/sbin/nginx` で起動する |
+| バージョン番号を URL にハードコードして古いものを使う | （エラーなし。古いバージョンがインストールされる） | nginx.org で最新 stable を必ず確認する |
+| `apt purge` 後に `nginx` コマンドが使えると思い込む | `bash: nginx: command not found` | `/usr/local/nginx/sbin/nginx` のフルパスを使う |
 
 ## 類似比較
 
-| 比較軸 | DAC | SELinux（MAC） | AppArmor（MAC） |
-|:---|:---|:---|:---|
-| 制御主体 | ファイル所有者 | システムポリシー（タイプ） | システムポリシー（パス） |
-| root の制約 | なし | プロセスコンテキストで縛れる | プロセスのパスで縛れる |
-| 設定コマンド | `chmod`, `chown` | `setenforce`, `chcon`, `semanage` | `aa-enforce`, `aa-complain` |
-| 違反ログの場所 | なし | `/var/log/audit/audit.log` | `/var/log/syslog` |
-| 主な採用 OS | 全 Linux | RHEL 系 | Debian 系 |
+| 比較軸 | `make install` | `apt install` |
+|:---|:---|:---|
+| ソース | 自分でダウンロードしたソースコード | Debian パッケージリポジトリ |
+| コンパイル | 自分の環境でリアルタイムに実施 | Debian がコンパイル済みのバイナリを配布 |
+| バージョン | nginx.org の任意バージョンを選択可能 | Debian リポジトリのバージョンのみ |
+| アップデート | tarball を再ダウンロードして再ビルド | `sudo apt upgrade` で自動更新 |
+| アンインストール | `sudo rm -rf /usr/local/nginx/` | `sudo apt purge nginx` |
+| セキュリティパッチ | 自分で管理（手動ビルドが必要） | Debian が配布（apt upgrade で適用） |
 
 ## 他OSとの比較
 
-| 操作 | Linux（RHEL/SELinux） | Linux（Debian/AppArmor） | Windows | macOS |
-|:---|:---|:---|:---|:---|
-| MAC の仕組み | SELinux（コンテキスト） | AppArmor（パスベース） | MIC / Credential Guard | TCC / SIP |
-| プロセス保護 | `httpd_t` コンテキスト | AppArmor プロファイル | Windows Defender | Gatekeeper |
-| 設定場所 | `/etc/selinux/`, `semanage` | `/etc/apparmor.d/` | レジストリ・グループポリシー | `システム設定` > `プライバシーとセキュリティ` |
-| 違反ログ | `/var/log/audit/audit.log` | `/var/log/syslog` | イベントビューアー | `/var/log/system.log` |
+| 操作 | Linux（Debian/RHEL） | Windows | macOS |
+|:---|:---|:---|:---|
+| ソースからビルド | `./configure && make && make install` | MSBuild / Visual Studio | `./configure && make && make install`（Homebrew も可） |
+| パッケージインストール | `apt install` / `dnf install` | winget / MSI インストーラー | `brew install` |
+| バイナリの場所 | `/usr/sbin/` または `/usr/local/` | `C:\Program Files\` | `/usr/local/bin/` |
+| ビルドツール | `gcc`・`make`（apt でインストール） | Visual Studio Build Tools | Xcode Command Line Tools |
 
 ## 理解度チェック
 
-1. DAC（任意アクセス制御）と MAC（強制アクセス制御）の違いを説明してください。
-   特に「root の扱い」に着目してください。
+1. `apt install nginx` と `./configure && make && make install` では、コンパイルのタイミングが異なる。それぞれいつコンパイルされるか説明してください。
 
-<details><summary>答え</summary>
+<details>
+<summary>答え</summary>
 
-DAC はファイルの所有者が自由にアクセス権を設定できる仕組みで、root はすべての DAC ルールを無視できる。
-MAC はシステム管理者が定義したポリシーにより、プロセスの動作を強制的に制限する仕組みで、
-root 権限でプロセスを動かしていてもポリシーの範囲外の操作は拒否される。
-MAC の目的は「プロセスが侵害された場合の被害範囲を最小化する」ことにある。
+`apt install nginx` の場合、Debian のビルドサーバーが事前にコンパイルし、バイナリをパッケージに含めて配布している。`apt install` 実行時にコンパイルは行われない。一方、`./configure && make && make install` の場合は自分の Codespaces 環境でリアルタイムにコンパイルが行われる（`make` の数分がその工程）。
 
 </details>
 
-2. RHEL 系 Linux で nginx を起動したところ失敗しました。
-   `audit.log` に `avc: denied { name_bind }` と記録されていました。
-   どのような原因が考えられますか？また、どのように対処しますか？
+2. ソースビルドした nginx のバイナリが `/usr/local/nginx/sbin/nginx` に配置されるのはなぜか。どこでこの場所が決まるか答えてください。
 
-<details><summary>答え</summary>
+<details>
+<summary>答え</summary>
 
-SELinux が nginx の指定ポートへのバインドを拒否している。
-`http_port_t` として許可されていないポート番号を nginx の設定に書いた可能性が高い。
-
-対処: `sudo semanage port -a -t http_port_t -p tcp <ポート番号>` で
-そのポートを nginx が使用できるよう SELinux に許可を追加し、nginx を再起動する。
+`./configure --prefix=/usr/local/nginx` の `--prefix` オプションで決まる。`--prefix` を変えればインストール先を自由に変更できる。`apt install nginx` は Debian パッケージ側で `/usr/sbin/nginx` に固定している。
 
 </details>
 
-3. SELinux の `enforcing` モードと `permissive` モードの違いは何ですか？
-   新しいサーバーを設定する際にはどちらを使うべきですか？
+3. `sudo apt purge nginx nginx-common` と `sudo apt remove nginx` の違いを説明してください。
 
-<details><summary>答え</summary>
+<details>
+<summary>答え</summary>
 
-`enforcing` モードはポリシー違反を実際に拒否し、`permissive` モードは拒否せずに違反をログに記録するだけだ。
-
-新しいサーバーを設定する際は `permissive` モードで動作確認し、
-`audit.log` に記録される違反（`avc: denied`）を確認しながらポリシーを調整する。
-設定が完成したら `enforcing` モードに戻す。
-本番環境で最初から `enforcing` を使うと、設定ミスで即座なサービス停止を招くため注意が必要だ。
+`apt remove` はバイナリを削除するが `/etc/nginx/` などの設定ファイルを残す。`apt purge` はバイナリと設定ファイルの両方を削除する。この章では「ゼロから再現する」ために `apt purge` を使った。
 
 </details>
 
-4. `/data/www/` を nginx のドキュメントルートに変更したところ、403 Forbidden が返るようになりました。
-   SELinux が有効な RHEL 環境での原因と対処を説明してください。
+4. ソースビルドした nginx には AppArmor プロファイルが存在しない。これはどのような問題を引き起こす可能性があるか、第11章のコラム（DAC の限界と MAC）の内容をもとに説明してください。
 
-<details><summary>答え</summary>
+<details>
+<summary>答え</summary>
 
-`/data/www/` のファイルに付いている SELinux コンテキスト（タイプ）が
-`httpd_sys_content_t` でないため、`httpd_t`（nginx プロセスのタイプ）から読み取れない状態になっている。
-
-対処:
-
-```bash
-$ sudo semanage fcontext -a -t httpd_sys_content_t "/data/www(/.*)?"
-$ sudo restorecon -Rv /data/www/
-```
-
-`semanage fcontext` でデフォルトのコンテキストを永続定義し、
-`restorecon` で既存ファイルへ適用する。`chcon` は再起動後にリセットされてしまう。
+AppArmor プロファイルがないと MAC（強制アクセス制御）による保護を受けられない。nginx プロセスが侵害された場合、アクセスを制限できず被害拡大のリスクがある。本番環境でソースビルド nginx を使う場合は、AppArmor プロファイルを手動で作成するか、SELinux のコンテキストを適切に設定する必要がある。
 
 </details>
 
-5. chapter-20 でソースビルドした nginx（`/usr/local/nginx/sbin/nginx`）は、
-   `apt install nginx` でインストールした nginx と比べてセキュリティ上どのような違いがありますか？
+5. ソースビルドした nginx にセキュリティパッチを適用するには何をすればよいか、手順を説明してください。
 
-<details><summary>答え</summary>
+<details>
+<summary>答え</summary>
 
-`apt install nginx` でインストールした nginx には、パッケージが自動的に AppArmor プロファイル（Debian/Ubuntu 系）
-または SELinux コンテキスト（RHEL 系）を設定する。
-一方、ソースビルドした nginx（`/usr/local/nginx/sbin/nginx`）にはパスが異なるため
-既存の MAC プロファイルが適用されず、MAC による保護がない状態になる。
+1. nginx.org で新しい stable バージョンの tarball をダウンロードする
+2. `tar xzf nginx-X.X.X.tar.gz` で展開する
+3. `cd nginx-X.X.X` でソースディレクトリへ移動する
+4. `./configure` で同じオプションを指定する
+5. `make` でコンパイルする
+6. 実行中の nginx を停止する（`sudo /usr/local/nginx/sbin/nginx -s stop`）
+7. `sudo make install` でバイナリを上書きする
+8. `sudo /usr/local/nginx/sbin/nginx` で再起動する
 
-ソースビルドを本番環境で使う場合は、自分で AppArmor プロファイルを作成するか、
-SELinux コンテキストを設定する必要がある。これが chapter-22 の Docker の優位性につながる：
-Docker はコンテナ単位で自動的にセキュリティ境界を設定するため、この問題を意識せずに済む。
+`apt upgrade` のような一発更新はできないため、バージョン管理の手間がかかる。
 
 </details>
 
-次章では、この章で学んだ MAC の概念を念頭に置きながら、nginx をソースコードからビルドし、apt インストールとの違いを実感します。
+次章では、この章で動かしたソースビルド nginx に OpenSSL で作成した自己署名の証明書を組み合わせ、HTTPS 化を設定します。
 
 ---
 
-| [← 第18章: logrotate でログを管理する](../chapter-18/README.md) | [全章目次](../README.md) | [第20章: Nginx をソースからビルドする →](../chapter-20/README.md) |
+| [← 第18章: logrotate でログを管理する](../chapter-18/README.md) | [全章目次](../README.md) | [第20章: [オプション] OpenSSL 証明書で HTTPS 化する →](../chapter-20/README.md) |
 |:---|:---:|---:|

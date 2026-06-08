@@ -478,6 +478,53 @@ $ sudo chmod 640 /var/www/html/index.nginx-debian.html
 
 `640` にすることで、www-data グループのプロセス（nginx）だけがファイルを読め、その他のユーザーからは見えなくなります。これが第10章で学んだグループとパーミッションを組み合わせた実用的な設定です。
 
+### コラム: DAC の限界と強制アクセス制御（MAC）
+
+この章で学んだ `chmod`/`chown` によるパーミッション制御は **DAC（Discretionary Access Control: 任意アクセス制御）** だ。ファイルの所有者が自由にアクセス権を設定できる仕組みだが、根本的な限界がある。
+
+**DAC の限界 — プロセスが乗っ取られた場合:**
+
+nginx プロセス（`www-data` ユーザー）が攻撃者に侵害されると、`www-data` として読み書きできるすべてのファイルに攻撃者がアクセスできてしまう。DAC は「正当なユーザーの誤操作を防ぐ」仕組みであり、「侵害されたプロセスの被害を最小化する」仕組みではない。
+
+**MAC（Mandatory Access Control: 強制アクセス制御）** はシステム管理者がポリシーを定義し、OS が一元的にアクセスを管理する仕組みだ。root 権限でプロセスが動いていても、ポリシー範囲外の操作は拒否される。
+
+| 比較軸 | DAC | MAC |
+|:---|:---|:---|
+| 制御主体 | ファイルの所有者 | システムポリシー（管理者が定義） |
+| root の制約 | なし（何でもできる） | プロセスの動作を縛れる |
+| 実装 | `chmod`・`chown` | SELinux / AppArmor |
+| 主な用途 | 一般的なファイル保護 | 侵害されたプロセスの被害最小化 |
+
+**SELinux と AppArmor の違い:**
+
+| 項目 | SELinux | AppArmor |
+|:---|:---|:---|
+| 主な採用OS | RHEL, CentOS, AlmaLinux | Debian, Ubuntu |
+| 制御の単位 | セキュリティコンテキスト（タイプラベル） | プログラムのパス |
+| 設定の難易度 | 高（全リソースにラベルが必要） | 中（パスベースで直感的） |
+| モード | `enforcing` / `permissive` / `disabled` | `enforce` / `complain` / `disabled` |
+
+**Codespaces（Debian）で AppArmor プロファイルを確認する:**
+
+> **[コンテナ制限]** Codespaces の Docker コンテナでは AppArmor カーネルモジュールが無効なため `aa-status` は使えない。プロファイルファイルを読んで仕組みを理解しよう。
+
+```bash
+# AppArmor プロファイルディレクトリの確認
+$ ls /etc/apparmor.d/
+local  usr.bin.man
+
+# man コマンドへのアクセス制御ポリシーを確認する
+$ cat /etc/apparmor.d/usr.bin.man
+```
+
+**SELinux の参照コマンド（RHEL 系・本環境では実行不可）:**
+
+```text
+$ getenforce            # SELinux のモードを確認（Enforcing/Permissive/Disabled）
+$ sestatus              # SELinux の詳細な状態を確認
+$ ls -Z /var/www/html/  # ファイルに付いたコンテキスト（セキュリティラベル）を確認
+```
+
 ---
 
 ## よくあるミス
@@ -519,7 +566,7 @@ $ sudo chmod 640 /var/www/html/index.nginx-debian.html
 > Windows の NTFS は ACL（アクセス制御リスト）方式で、ユーザーやグループごとに細かく権限を設定できます。
 > Linux の DAC（Discretionary Access Control: 任意アクセス制御 — ファイルの所有者が権限を自由に設定できる方式）は「所有者・グループ・その他」という3層の単純な構造ですが、
 > グループを適切に設計することで同等のアクセス制御が可能です。
-> さらに SELinux・AppArmor（第16章）を追加することで、Linux でも MAC（Mandatory Access Control: 強制アクセス制御 — OS が一元的にアクセスを管理する方式）が使えます。
+> さらに SELinux・AppArmor（本章のコラムで解説）を追加することで、Linux でも MAC（Mandatory Access Control: 強制アクセス制御）が使えます。
 
 ---
 

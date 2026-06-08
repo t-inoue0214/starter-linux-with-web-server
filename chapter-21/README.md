@@ -1,436 +1,345 @@
-# 第21章: [オプション] OpenSSL 証明書で HTTPS 化する
+# 第21章: Docker で全部まとめて自動化する
 
 ## 前提知識
 
 この章を始める前に、以下の章を完了していること:
 
-- 第12章: ネットワーク基礎（HTTP=80番ポート・HTTPS=443番ポートの知識）
-- 第20章: Nginx をソースからビルドする（`--with-http_ssl_module` 付きでビルド済み）
+- 第04章: nginx をインストールして動かす（`apt install nginx` の使い方）
+- 第19章: Nginx をソースからビルドする（手動でのインストール全工程）
 
 ## 概要
 
-第20章でビルドした nginx は `--with-http_ssl_module` オプションが有効になっている。
-この章では OpenSSL（暗号ライブラリ）を使って自己署名の証明書を生成し、nginx に HTTPS を設定するまでの全工程を体験する。
-
-「HTTP は平文通信」「HTTPS は暗号化通信」という違いを実際に手を動かして体験することが目標だ。
-また、Let's Encrypt（無料の CA）が行う証明書管理を chapter-22（Docker）でコンテナに任せる伏線でもある。
+chapter-00 から chapter-20 まで、Linux の各種操作を手動でひとつひとつ実行してきた。
+この章では Docker を使い、その全作業をわずか数十行の「Dockerfile」で自動的に再現する。
+手動作業の苦労を経験しているからこそ、Dockerfile の各行が何をしているかを深く理解できる。
+コンテナ技術がなぜ普及したかを体感的に学ぶ、カリキュラムのフィナーレとなる章だ。
 
 ## 手順
 
-### 21-1. HTTP と HTTPS の違い・TLS の仕組みを理解する
+### 21-1. Docker とは何か
 
-HTTP 通信はリクエスト・レスポンスが**平文（暗号化なし）**で送受信される。
-ネットワーク上の第三者が通信を傍受すると、パスワードやクレジットカード番号がそのまま見える。
+Docker は「コンテナ」と呼ばれる仕組みで、アプリケーションとその実行に必要な環境をひとまとめにして動かすツールだ。
 
-HTTPS は TLS（Transport Layer Security）プロトコルを使って通信を暗号化する。
+**Docker の3つの基本概念:**
 
-TLS ハンドシェイクの流れを概念的に示す:
+| 用語 | 意味 | たとえ |
+|:---|:---|:---|
+| **Image（イメージ）** | コンテナの設計図。Dockerfile から作成する | 料理のレシピ |
+| **Container（コンテナ）** | Image から作った実行中のプロセス（アプリ） | 料理（レシピから作った実物） |
+| **Layer（レイヤー）** | Dockerfile の各命令が積み重なった構造 | 玉ねぎの皮（重ね合わせ） |
+
+**手動ビルドと Docker の対比:**
+
+| 項目 | 第19章（手動） | 第21章（Docker） |
+|:---|:---|:---|
+| OS のセットアップ | 手動で依存パッケージをインストール | `FROM debian:bookworm-slim`（1 行） |
+| nginx のインストール | ソースコードをダウンロード・コンパイル（30〜60 分） | `apt-get install -y nginx`（1 行） |
+| HTML ファイルの配置 | vim で手動編集・配置 | `COPY html/ /var/www/html/`（1 行） |
+| サービスの起動 | `sudo /usr/local/nginx/sbin/nginx` | `CMD ["nginx", "-g", "daemon off;"]`（1 行） |
+| 再現性 | 手順書に従えば再現可 | `docker build` で完全再現 |
+| 配布 | サーバーごとに設定が必要 | `docker push` でイメージを配布可能 |
+
+> **「コンテナ内で `apt install nginx` を使っているのは chapter-04 と同じでは？」**
+> その通り。しかし chapter-19 で 30〜60 分かけて手動ビルドしたからこそ、nginx の内部構造を理解できた。
+> コンテナは「作業を自動化する道具」だが、中身を理解せずに使うと問題発生時に対処できない。
+> 手動構築の経験が、コンテナを「使いこなす」エンジニアとの差になる。
+
+### 21-2. Docker をインストールして起動する
+
+Codespaces には Docker がプリインストールされていないため、まずインストールする。
+Codespaces 自体が Docker コンテナで動いているが、`devcontainer.json`（Codespaces の開発環境設定ファイル）に `--privileged` が設定済みだ。
+そのため、コンテナ内でさらに Docker（Docker-in-Docker: コンテナの中でさらに Docker を動かす構成）を起動できる。
+
+```bash
+# Docker のインストール
+$ sudo apt update
+$ sudo apt install -y docker.io
+
+# Docker daemon の起動
+# （Codespaces はコンテナ環境なので systemctl ではなく service コマンドを使う）
+$ sudo service docker start
+mount: /sys/fs/cgroup/cpuset: cgroup already mounted on /sys/fs/cgroup.
+（中略：cgroup already mounted の警告が複数行出るが無害）
+Starting Docker: docker.
+```
+
+> **cgroup の警告について:**
+> `mount: cgroup already mounted` の警告が複数行表示されるが、これは Codespaces 自体がコンテナ環境で動いているためであり、無害だ。
+> 最後に `Starting Docker: docker.` が表示されれば正常に起動している。
+
+```bash
+# バージョン確認
+$ docker --version
+Docker version 26.1.5+dfsg1, build a72d7cd
+
+# sudo なしで docker コマンドを使えるようにする
+$ sudo usermod -aG docker $USER
+$ newgrp docker
+
+# 動作確認（hello-world イメージを pull して実行）
+$ docker run hello-world
+
+Hello from Docker!
+This message shows that your installation appears to be working correctly.
+（以下省略）
+```
+
+> **`newgrp docker` について:**
+> `usermod` でグループを追加しても、現在のセッションには即座に反映されない。
+> `newgrp docker` を実行すると、再ログインなしで新しいグループで新しいシェルを起動できる。
+> ターミナルを一度閉じて再度開いても同様に反映される。
+
+### 21-3. Dockerfile を書く
+
+`chapter-21/Dockerfile` をテキストエディタで確認しよう。
+
+```bash
+$ cat /workspaces/starter-linux-with-web-server/chapter-21/Dockerfile
+```
+
+```dockerfile
+FROM debian:bookworm-slim
+
+RUN apt-get update && \
+    apt-get install -y nginx && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY html/ /var/www/html/
+
+EXPOSE 80
+
+CMD ["nginx", "-g", "daemon off;"]
+```
+
+**各命令の解説:**
+
+| 命令 | 役割 | この Dockerfile での使い方 |
+|:---|:---|:---|
+| `FROM` | ベースとなる Image を指定（最初の Layer） | `debian:bookworm-slim`（軽量 Debian） |
+| `RUN` | ビルド中にコマンドを実行して Layer を積み上げる | nginx のインストールとキャッシュの削除 |
+| `COPY` | ホストのファイルをコンテナ内にコピーする | `html/` ディレクトリを `/var/www/html/` に配置 |
+| `EXPOSE` | コンテナが使うポート番号を宣言する | HTTP の 80 番ポートを使用 |
+| `CMD` | コンテナ起動時に実行するコマンドを指定する | nginx をフォアグラウンドで実行 |
+
+> **`apt-get clean && rm -rf /var/lib/apt/lists/*` の理由:**
+> `RUN` 命令の最後にキャッシュを削除することで、Image のサイズを小さくできる。
+> `RUN` 命令は 1 行ごとに Layer を作るため、`&&` でつなげて 1 つの Layer にまとめるのが定石だ。
+>
+> **`daemon off;` の理由:**
+> Docker はコンテナのメインプロセス（PID 1: コンテナ起動時に最初に動くプロセス番号 1 のプロセス）が終了するとコンテナも停止する。
+> nginx はデフォルトでバックグラウンド（daemon）として起動するため、
+> フォアグラウンドで動かす `daemon off;` オプションが必要だ。
+
+### 21-4. イメージをビルドする
+
+```bash
+$ cd /workspaces/starter-linux-with-web-server/chapter-21
+$ docker build -t nginx-hardway .
+```
+
+`docker build` の実行中、Dockerfile の各命令が Layer として積み上げられる様子が確認できる:
 
 ```text
-クライアント                    サーバー
-    │                              │
-    │ ① ClientHello                │  ← 対応する暗号方式を提示
-    │──────────────────────────────►
-    │                              │
-    │ ② ServerHello + 証明書       │  ← 証明書（公開鍵入り）を送る
-    │◄──────────────────────────────
-    │                              │
-    │ ③ 証明書を検証               │  ← CA の署名を確認
-    │                              │
-    │ ④ セッション鍵の交換         │  ← 公開鍵暗号（異なる鍵で暗号化・復号する方式）で対称鍵（同じ鍵で暗号化・復号する方式）を共有
-    │◄─────────────────────────────►
-    │                              │
-    │ ⑤ 暗号化通信（対称鍵）       │
-    │◄─────────────────────────────►
+#1 [internal] load build definition from Dockerfile
+#2 [internal] load metadata for docker.io/library/debian:bookworm-slim
+#3 [internal] load .dockerignore
+#4 [internal] load build context
+#5 [1/3] FROM docker.io/library/debian:bookworm-slim
+  ダウンロード完了
+#6 [2/3] RUN apt-get update && apt-get install -y nginx ...
+  nginx インストール完了（約9秒）
+#7 [3/3] COPY html/ /var/www/html/
+#8 exporting to image
 ```
 
-**CA（認証局）と自己署名の証明書の違い:**
-
-| | CA 署名証明書 | 自己署名の証明書（オレオレ証明書） |
-|:---|:---|:---|
-| 署名者 | 信頼された第三者機関（Let's Encrypt 等） | 自分自身 |
-| ブラウザの表示 | 鍵マーク（信頼済み） | 警告（「この接続は安全ではありません」） |
-| 用途 | 本番サービス | 開発・学習環境 |
-| コスト | 無料（Let's Encrypt）〜有料 | 無料 |
-
-この章では自己署名の証明書を使う。ブラウザ警告が出るのは想定通りの動作だ。
-
-**SSL モジュールが有効になっているか確認する:**
+ビルドが完了したらイメージを確認しよう:
 
 ```bash
-$ /usr/local/nginx/sbin/nginx -V 2>&1 | grep -o 'with-http_ssl_module'
-with-http_ssl_module
+$ docker images nginx-hardway
+REPOSITORY      TAG       IMAGE ID       CREATED          SIZE
+nginx-hardway   latest    4c6eec2e61e8   21 seconds ago   90.3MB
 ```
 
-`with-http_ssl_module` が表示されれば、第20章でビルドした nginx に SSL 機能が組み込まれている。
+> **`[1/3]`, `[2/3]`, `[3/3]` の意味:**
+> Dockerfile の `RUN`・`COPY` など、Layer を作る命令の番号。
+> `FROM` はベースイメージなので `[1/3]`、`RUN` が `[2/3]`、`COPY` が `[3/3]` となる。
+> Layer はキャッシュされるため、2 回目以降の `docker build` は変更された Layer 以降のみ再実行される。
 
-### 21-2. OpenSSL で秘密鍵と証明書を生成する
-
-**学習目標:** 秘密鍵・CSR・証明書の 3 ファイルの関係を理解し、`openssl` コマンドで生成できる。
-
-**openssl のバージョンを確認する:**
+### 21-5. コンテナを起動して確認する
 
 ```bash
-$ openssl version
-OpenSSL 3.5.6 7 Apr 2026 (Library: OpenSSL 3.5.6 7 Apr 2026)
-```
+# コンテナを起動（-d: バックグラウンド、-p: ポートのマッピング、--name: コンテナ名）
+$ docker run -d -p 8080:80 --name nginx-test nginx-hardway
+e9f662c10cc2128027a6ee5297609a715ef5ee95c792795f90c2a44442b7eec8
 
-**作業ディレクトリ（nginx の設定ディレクトリ）に移動する:**
+# 起動中のコンテナを確認
+$ docker ps
+CONTAINER ID   IMAGE           COMMAND                  CREATED        STATUS        PORTS                                   NAMES
+e9f662c10cc2   nginx-hardway   "nginx -g 'daemon of…"   6 seconds ago  Up 6 seconds  0.0.0.0:8080->80/tcp, :::8080->80/tcp   nginx-test
+```
 
 ```bash
-$ cd /usr/local/nginx/conf
-```
-
-**Step 1: 秘密鍵を生成する（AES-256 で暗号化・パスフレーズあり）:**
-
-```bash
-$ sudo openssl genrsa -aes256 -out server.key 2048
-Enter PEM pass phrase:（任意のパスフレーズ＝秘密の文字列を入力・画面には表示されない）
-Verifying - Enter PEM pass phrase:（同じパスフレーズを再入力）
-```
-
-> `-aes256` は秘密鍵自体を AES-256 で暗号化するオプション。
-> パスフレーズを設定することで、鍵ファイルが漏洩しても単体では悪用されにくくなる。
-> `2048` はビット数（鍵の強度）。数字はオプションの後ろに書く。
-
-**Step 2: CSR（証明書の署名要求）を生成する:**
-
-CSR は「この公開鍵で証明書を作ってほしい」というリクエストファイルだ。
-本番環境では CA に提出するが、今回は自己署名（自分で署名）するために使う。
-
-```bash
-$ sudo openssl req -new \
-    -key server.key \
-    -out server.csr \
-    -subj "/C=JP/ST=Tokyo/O=Learning/CN=localhost"
-Enter pass phrase for server.key:（Step 1 のパスフレーズを入力）
-```
-
-| オプション | 意味 |
-|:---|:---|
-| `-key server.key` | 秘密鍵を指定 |
-| `-out server.csr` | CSR の出力先 |
-| `-subj "/C=JP/..."` | 証明書に埋め込む組織情報（`-subj` で対話入力を省略） |
-
-**SAN 設定ファイルを作成する:**
-
-SAN（Subject Alternative Name）は証明書が有効なドメイン・IP アドレスを列挙する拡張情報だ。
-Chrome 58（2017年）以降、SAN がない証明書は `NET::ERR_CERT_COMMON_NAME_INVALID` エラーになる。
-
-```bash
-$ printf "subjectAltName=DNS:localhost,IP:127.0.0.1" \
-    | sudo tee /usr/local/nginx/conf/san.cnf
-subjectAltName=DNS:localhost,IP:127.0.0.1
-```
-
-**Step 3: CSR に自己署名して証明書を生成する（san.cnf を使用）:**
-
-```bash
-$ sudo openssl x509 -req -days 365 \
-    -in server.csr \
-    -signkey server.key \
-    -out server.crt \
-    -extfile /usr/local/nginx/conf/san.cnf
-Enter pass phrase for server.key:（Step 1 のパスフレーズを入力）
-Certificate request self-signature ok
-subject=C=JP, ST=Tokyo, O=Learning, CN=localhost
-```
-
-`Certificate request self-signature ok` が表示されれば証明書の生成成功だ。
-
-**生成されたファイルを確認する:**
-
-```bash
-$ sudo ls -la /usr/local/nginx/conf/server.* /usr/local/nginx/conf/san.cnf
--rw-r--r-- 1 root root   41 Jun  7 10:31 /usr/local/nginx/conf/san.cnf
--rw-r--r-- 1 root root 1212 Jun  7 10:31 /usr/local/nginx/conf/server.crt
--rw-r--r-- 1 root root  956 Jun  7 10:31 /usr/local/nginx/conf/server.csr
--rw------- 1 root root 1886 Jun  7 10:31 /usr/local/nginx/conf/server.key
-```
-
-**各ファイルの役割:**
-
-| ファイル | 役割 | 公開・秘密 |
-|:---|:---|:---|
-| `server.key` | 秘密鍵（署名・復号に使う。絶対に漏らしてはいけない） | **秘密** |
-| `server.csr` | 証明書の署名要求（自己署名後は不要。削除してもよい） | どちらでも可 |
-| `server.crt` | 証明書（公開鍵と組織情報入り。クライアントに送る） | **公開** |
-| `san.cnf` | SAN 設定ファイル（証明書生成時のみ使用） | どちらでも可 |
-
-> **`server.key` のパーミッション:** `-rw-------`（root のみ読み書き可能）。
-> nginx は root で起動するため問題ない。`chmod 644` などで権限を広げないこと。
-
-### 21-3. nginx.conf に HTTPS サーバーブロックを追加する
-
-**学習目標:** nginx の設定ファイルに SSL ブロックを追記し、`-t` で検証・reload できる。
-
-**パスフレーズファイルを作成する:**
-
-パスフレーズ付き秘密鍵を使う場合、nginx の起動・リロードのたびにパスフレーズが必要になる。
-`ssl_password_file` ディレクティブでパスフレーズを読み取るファイルを指定することで、
-自動化された環境でも nginx を起動できる。
-
-```bash
-# パスフレーズを 1 行だけ書いたファイルを作成する（パスフレーズの部分は実際に設定した値に変える）
-$ printf 'あなたのパスフレーズ' | sudo tee /usr/local/nginx/conf/ssl_pass.txt > /dev/null
-$ sudo chmod 600 /usr/local/nginx/conf/ssl_pass.txt
-```
-
-> **`ssl_pass.txt` の権限:** `chmod 600` で root のみ読み書き可能にする。
-> このファイルが漏洩するとパスフレーズが露出するため、取り扱いに注意する。
-
-**`/usr/local/nginx/conf/nginx.conf` を開いて HTTPS サーバーブロックを追加する:**
-
-既存の `http { ... }` ブロック内の末尾（最後の `}` の直前）に追記する。
-
-```nginx
-    # HTTPS server
-    server {
-        listen       443 ssl;
-        server_name  localhost;
-
-        ssl_certificate      /usr/local/nginx/conf/server.crt;
-        ssl_certificate_key  /usr/local/nginx/conf/server.key;
-        ssl_password_file    /usr/local/nginx/conf/ssl_pass.txt;
-
-        ssl_session_cache    shared:SSL:1m;
-        ssl_session_timeout  5m;
-
-        location / {
-            root   html;
-            index  index.html index.htm;
-        }
-    }
-```
-
-| ディレクティブ | 意味 |
-|:---|:---|
-| `listen 443 ssl;` | ポート 443 で SSL/TLS を受け付ける |
-| `ssl_certificate` | 証明書ファイルのパス（公開される） |
-| `ssl_certificate_key` | 秘密鍵ファイルのパス（絶対に公開しない） |
-| `ssl_password_file` | 秘密鍵のパスフレーズが書かれたファイル |
-
-**設定ファイルの構文テストを行う:**
-
-```bash
-$ sudo /usr/local/nginx/sbin/nginx -t
-nginx: the configuration file /usr/local/nginx/conf/nginx.conf syntax is ok
-nginx: configuration file /usr/local/nginx/conf/nginx.conf test is successful
-```
-
-**設定を反映する:**
-
-```bash
-# nginx が起動中の場合は reload（既存の接続を維持したまま設定を切り替える）
-$ sudo /usr/local/nginx/sbin/nginx -s reload
-
-# nginx が停止していた場合は起動
-$ sudo /usr/local/nginx/sbin/nginx
-```
-
-**ポートを確認する（80 と 443 が両方 LISTEN になっていること）:**
-
-```bash
-$ ss -tlnp | grep ':80\|:443'
-LISTEN 0      511          0.0.0.0:443        0.0.0.0:*
-LISTEN 0      511          0.0.0.0:80         0.0.0.0:*
-```
-
-### 21-4. HTTPS で動作確認する
-
-**学習目標:** `curl -k` で HTTPS 接続を確認し、ブラウザ警告の理由を説明できる。
-
-**`curl -k` で HTTPS アクセスする:**
-
-```bash
-# -k: 自己署名の証明書を無視して接続（本番では -k は使わない）
-$ curl -k https://localhost/ | head -5
+# HTTP リクエストを送って動作確認
+$ curl http://localhost:8080
 <!DOCTYPE html>
 <html>
-<head>
-<title>Welcome to nginx!</title>
-<style>
+<head><title>Hello from Docker!</title></head>
+<body>
+<h1>Hello from Docker!</h1>
+<p>chapter-00〜20 の学習お疲れさまでした。</p>
+</body>
+</html>
 ```
-
-**`-v` でハンドシェイクの詳細を確認する:**
 
 ```bash
-$ curl -kv https://localhost/ 2>&1 | grep -E "SSL connection|subject:|issuer:|expire date:|HTTP/"
-* SSL connection using TLSv1.3 / TLS_AES_256_GCM_SHA384 / X25519MLKEM768 / RSASSA-PSS
-*  subject: C=JP; ST=Tokyo; O=Learning; CN=localhost
-*  expire date: Jun  7 10:31:57 2027 GMT
-*  issuer: C=JP; ST=Tokyo; O=Learning; CN=localhost
-* using HTTP/1.x
-< HTTP/1.1 200 OK
+# コンテナ内の nginx バージョンを確認（ホストのバージョンと比較してみよう）
+$ docker exec nginx-test nginx -v
+nginx version: nginx/1.22.1
 ```
 
-| フィールド | 確認内容 |
-|:---|:---|
-| `TLSv1.3` | 最新の TLS バージョンを使用 |
-| `subject` | 証明書の発行先（サーバー情報） |
-| `issuer` | 証明書の署名者。自己署名のため `subject` と同じ |
-| `expire date` | 有効期限（365日後） |
-
-**ブラウザ警告について:**
-
-Codespaces の「ポート」タブからポート 443 を公開してブラウザでアクセスすると、
-「この接続は安全でない」という警告が表示される。
-これは自己署名の証明書が信頼された CA に署名されていないためで、**想定通りの動作**だ。
-
-「詳細設定 → localhost にアクセスする（安全でない）」で続行できる。
-
-> **本番環境での証明書管理:**
-> Let's Encrypt は無料で CA 署名済み証明書を発行する。
-> chapter-22（Docker）では Certbot コンテナが証明書の取得・自動更新を管理する例を紹介する。
-> 「毎年手動で証明書を更新する手間」をコンテナが解消する具体例になる。
-
-### 21-5. 証明書の内容を確認する
-
-**学習目標:** `openssl x509` コマンドで証明書のメタデータを読み取れる。
+> **バージョンの違いに注目:**
+> コンテナ内の nginx は `apt install` で入れた `1.22.1`（Debian 公式パッケージ）。
+> ホストにインストールした nginx はソースからビルドした `1.30.2`。
+> どちらも「nginx を動かす」という点は同じだが、管理方法と自由度が大きく異なる。
 
 ```bash
-$ openssl x509 -noout -text -in /usr/local/nginx/conf/server.crt
-Certificate:
-    Data:
-        Version: 3 (0x2)
-        Serial Number:
-            07:db:61:ac:ec:02:b8:03:c8:b7:51:bc:b1:28:c7:a1:2c:22:98:ec
-        Signature Algorithm: sha256WithRSAEncryption
-        Issuer: C=JP, ST=Tokyo, O=Learning, CN=localhost
-        Validity
-            Not Before: Jun  7 10:31:57 2026 GMT
-            Not After : Jun  7 10:31:57 2027 GMT
-        Subject: C=JP, ST=Tokyo, O=Learning, CN=localhost
-        Subject Public Key Info:
-            Public Key Algorithm: rsaEncryption
-                Public-Key: (2048 bit)
-        X509v3 extensions:
-            X509v3 Subject Alternative Name:
-                DNS:localhost, IP Address:127.0.0.1
+# コンテナのログを確認（nginx はファイルにログを書くため、通常は空）
+$ docker logs nginx-test
+（出力なし）
+
+# コンテナ内に入って直接確認する
+$ docker exec -it nginx-test bash
+root@e9f662c10cc2:/# nginx -v
+nginx version: nginx/1.22.1
+root@e9f662c10cc2:/# cat /var/log/nginx/access.log
+（curl でアクセスした記録が表示される）
+root@e9f662c10cc2:/# exit
 ```
 
-**確認すべきポイント:**
+```bash
+# コンテナの停止・削除・イメージの削除
+$ docker stop nginx-test
+nginx-test
+$ docker rm nginx-test
+nginx-test
+$ docker rmi nginx-hardway
+Untagged: nginx-hardway:latest
+Deleted: sha256:4c6eec2e61e8...
+```
 
-| フィールド | 確認内容 |
-|:---|:---|
-| `Issuer` | 「誰が署名したか」。自己署名のため `Subject` と同じ |
-| `Validity` | 有効期限（`Not After` が 365日後になっていること） |
-| `Subject Alternative Name` | `DNS:localhost` と `IP Address:127.0.0.1` が含まれていること |
-| `Signature Algorithm` | `sha256WithRSAEncryption`（SHA-256〔ハッシュ関数〕と RSA〔公開鍵の暗号方式〕を組み合わせた署名アルゴリズム） |
+### 21-6. まとめ: 手動とコンテナの価値
 
-> **`Issuer` と `Subject` が同じ理由:**
-> 自己署名の証明書は「自分が発行して自分が署名した証明書」だ。
-> CA 署名証明書では `Issuer` が Let's Encrypt 等になる。
+chapter-00 から chapter-20 まで、あなたは以下のことを手動で行ってきた:
+
+- ファイルの操作・パーミッションの設定（chapter-02〜06）
+- ユーザー管理・プロセス管理（chapter-09〜11）
+- ネットワーク・SSH の設定（chapter-12〜14）
+- nginx のインストールと設定（chapter-04、chapter-19）
+- TLS/HTTPS の設定（chapter-20）
+
+この章で作成した Dockerfile は、その一部をわずか 10 行で再現した。
+
+**手動構築の価値:**
+Dockerfile の `RUN apt-get install -y nginx` の 1 行の裏に、chapter-19 での 30〜60 分の作業がある。
+その経験があるからこそ、「`apt install` で何が起きているか」「ビルドオプションの意味」を理解できる。
+コンテナは「作業を自動化する道具」であり、中身を理解している人だけが使いこなせる。
+
+**コンテナ技術の価値:**
+「どの環境でも同じように動く」「すぐに再現・配布できる」「不要になればきれいに削除できる」。
+これらを体感したうえで Docker や Kubernetes（多数のコンテナを一元管理するオーケストレーションツール）を学ぶと、技術の本質を理解したうえで活用できる。
 
 ## よくあるミス
 
 | ミス | エラーメッセージ例 | 正しい対処 |
 |:---|:---|:---|
-| `server` ブロックを `http {}` の外に書く | `nginx: [emerg] "server" directive is not allowed here` | `server {}` は `http {}` の内側に書く |
-| 証明書パスに相対パスを使う | `ssl_certificate ... no such file` | `/usr/local/nginx/conf/server.crt` のように絶対パスで書く |
-| `curl -k` なしでアクセス | `curl: (60) SSL certificate problem: self-signed certificate` | 自己署名の証明書には必ず `-k` を付ける |
-| SAN なしで証明書を生成 | Chrome で `NET::ERR_CERT_COMMON_NAME_INVALID` | `san.cnf` を用意して `-extfile san.cnf` を付けて再生成する |
-| `ssl_pass.txt` の権限が広すぎる | `nginx: [warn] "ssl_password_file" ... permission problem` | `chmod 600 ssl_pass.txt` で root のみ読み取り可能にする |
-| パスフレーズを忘れる | `nginx: [emerg] cannot load certificate key ... bad password read` | パスフレーズを必ずメモしておく。忘れた場合は鍵を作り直す |
+| `docker build` を `chapter-21/` 以外で実行 | `ERROR: failed to solve: failed to read dockerfile: open Dockerfile: no such file or directory` | `cd chapter-21` してから実行する |
+| `sudo service docker start` を忘れる | `Cannot connect to the Docker daemon at unix:///var/run/docker.sock` | `sudo service docker start` を実行する |
+| `newgrp docker` を忘れて sudo なしで実行 | `permission denied while trying to connect to the Docker daemon socket` | `newgrp docker` を実行するか `sudo docker` を使う |
+| 同名コンテナが残っている | `Conflict. The container name "/nginx-test" is already in use` | `docker rm nginx-test` してから再実行 |
+| `COPY html/` を書いて `html/` がない | `COPY failed: file not found in build context` | `chapter-21/html/index.html` を作成する |
+| `daemon off;` を書かない | コンテナが起動してもすぐに終了する | `CMD ["nginx", "-g", "daemon off;"]` を確認する |
 
 ## 類似比較
 
-| 比較軸 | `openssl genrsa -aes256` | `openssl genrsa`（パスフレーズなし） |
+| コマンド | 対象 | 違い |
 |:---|:---|:---|
-| 鍵ファイルの状態 | AES-256 で暗号化（ファイルが漏洩しても安全） | 平文（ファイルが漏洩すると即座に悪用可能） |
-| nginx 起動時 | パスフレーズが必要（`ssl_password_file` で自動化） | パスフレーズ不要（即座に起動できる） |
-| 用途 | セキュリティを重視する環境 | 開発・テスト環境 |
-
-| 比較軸 | 自己署名の証明書 | Let's Encrypt（ACME） |
-|:---|:---|:---|
-| 署名者 | 自分自身 | 信頼された CA（認証局） |
-| コスト | 無料 | 無料 |
-| 有効期限 | 任意（今回は 365日） | 90日（自動更新可能） |
-| ブラウザ | 警告が出る | 信頼済み（警告なし） |
-| 用途 | 開発・学習 | 本番サービス |
+| `docker build` | Dockerfile | Dockerfile を読んで Image を作成する |
+| `docker run` | Image | Image からコンテナを起動する |
+| `docker exec` | 起動中のコンテナ | 起動中のコンテナ内でコマンドを実行する |
+| `docker stop` | 起動中のコンテナ | コンテナを停止する（削除はしない） |
+| `docker rm` | 停止中のコンテナ | 停止済みのコンテナを削除する |
+| `docker rmi` | Image | ローカルの Image を削除する |
 
 ## 他OSとの比較
 
-| 操作 | Linux (Debian) | Windows | macOS |
+| 操作 | Linux（Debian） | Windows | macOS |
 |:---|:---|:---|:---|
-| 証明書の生成 | `openssl genrsa` + `openssl req` + `openssl x509` | `New-SelfSignedCertificate`（PowerShell）または openssl | `openssl`（Homebrew でインストール）または Keychain Access |
-| 証明書のインストール（信頼済みに） | ブラウザやシステムの CA ストアに追加 | 証明書マネージャー（certmgr.msc） | キーチェーンアクセス |
-| HTTPS サーバー設定 | nginx.conf を手動編集 | IIS マネージャー（GUI） | Apache/nginx の設定ファイル |
-| Let's Encrypt | Certbot（apt または Docker） | win-acme | Certbot（Homebrew） |
+| Docker のインストール | `apt install docker.io` | Docker Desktop（公式インストーラー） | Docker Desktop（公式インストーラー） |
+| daemon の起動 | `sudo service docker start` | Docker Desktop が自動で起動 | Docker Desktop が自動で起動 |
+| ソケットのパス | `/var/run/docker.sock` | `//./pipe/docker_engine` | `/var/run/docker.sock`（Lima 経由） |
+| コンテナ内の OS | Linux（ホストカーネルを共有） | Linux（WSL2 または Hyper-V） | Linux（仮想マシン） |
+
+> **Windows / macOS での注意:**
+> Windows と macOS では Docker Desktop がバックグラウンドで Linux 仮想マシンを動かし、その中でコンテナを実行する。
+> そのため、コンテナ内は常に Linux 環境になる。
 
 ## 理解度チェック
 
-1. HTTP と HTTPS の通信の違いを説明してください。
-   特に「傍受された場合」に何が起きるかを含めて答えてください。
+1. Docker の「Image」と「Container」の違いを説明してください。
 
 <details><summary>答え</summary>
 
-HTTP は通信内容が平文（暗号化なし）で送受信される。ネットワーク上の第三者が通信を傍受すると、
-パスワードや個人情報がそのまま見える。
-
-HTTPS は TLS で通信を暗号化するため、傍受されても内容を解読できない。
-「① クライアントとサーバーが鍵を交換 → ② 共有した鍵で通信を暗号化」という流れで実現する。
+Image はコンテナの設計図（Dockerfile から作成した静的なもの）。
+Container は Image から作った実行中のプロセス（動いているもの）。
+1 つの Image から複数の Container を同時に起動できる。
 
 </details>
 
-2. 今回生成した `server.key`・`server.csr`・`server.crt` の 3 ファイルはそれぞれ何のためのファイルですか？
+2. `CMD ["nginx", "-g", "daemon off;"]` に `daemon off;` が必要な理由を説明してください。
 
 <details><summary>答え</summary>
 
-- `server.key`: 秘密鍵。データの署名・復号に使う。絶対に公開してはいけない。
-- `server.csr`: 証明書の署名要求。「この公開鍵で証明書を作ってほしい」というリクエストファイル。
-  本番環境では CA に提出する。自己署名後は不要。
-- `server.crt`: 証明書。公開鍵と組織情報が CA（今回は自分）の署名で保護されたファイル。
-  クライアントに送られ、接続先の正当性を証明する。
+Docker はコンテナのメインプロセス（PID 1）が終了するとコンテナも停止する。
+nginx はデフォルトでバックグラウンド（daemon）として起動するため、すぐに PID 1 が終了してコンテナが止まってしまう。
+`daemon off;` を指定することで nginx がフォアグラウンドで動き続け、コンテナが起動状態を維持できる。
 
 </details>
 
-3. 自己署名の証明書を使うと、ブラウザが警告を表示するのはなぜですか？
-   CA 署名証明書との違いも含めて答えてください。
+3. `docker build -t nginx-hardway .` コマンドの各部分（`-t nginx-hardway`・`.`）の意味を説明してください。
 
 <details><summary>答え</summary>
 
-自己署名の証明書は「信頼された第三者機関（CA）による署名」がない。
-ブラウザは「この証明書を信頼してよいか」を CA の署名で確認するが、
-自己署名の証明書は自分自身で署名しているため「誰が保証したか分からない」と判断して警告を表示する。
-
-CA 署名証明書（Let's Encrypt 等）は信頼された CA が「このサーバーは確かに本人だ」と署名しているため、
-ブラウザは警告なしに接続できる。
+`-t nginx-hardway`: 作成する Image に `nginx-hardway` という名前（タグ）をつける。
+`.`: Dockerfile が置いてあるディレクトリ（ここではカレントディレクトリ）を指定する。
+`.` は「このディレクトリの Dockerfile を使う」という意味。
 
 </details>
 
-4. `ssl_password_file` ディレクティブを設定する目的は何ですか？
-   設定しない場合と比較して答えてください。
+4. `docker run -d -p 8080:80 --name nginx-test nginx-hardway` の `-p 8080:80` は何を意味しますか？
 
 <details><summary>答え</summary>
 
-`ssl_password_file` はパスフレーズ付き秘密鍵のパスフレーズをファイルから自動的に読み取るディレクティブ。
-
-**設定しない場合:** nginx の起動・リロードのたびに対話的なパスフレーズ入力が必要になる。
-スクリプトや自動再起動（サーバー再起動後）でパスフレーズが入力できず、nginx が起動できない。
-
-**設定した場合:** パスフレーズをファイルに保存しておくことで自動起動・リロードが可能になる。
-ただし `ssl_pass.txt` の権限を `600`（root のみ読み書き可能）にして管理する必要がある。
+ホスト（Codespaces）の 8080 番ポートを、コンテナ内の 80 番ポートにつなぐ（転送する）指定。
+`curl http://localhost:8080` でアクセスすると、コンテナ内の nginx（80 番ポート）にリクエストが届く。
+書式は `-p ホスト側ポート:コンテナ側ポート`。
 
 </details>
 
-5. `openssl x509 -noout -text -in server.crt` の出力で「`Issuer` と `Subject` が同じ」になっているのはなぜですか？
+5. chapter-19 で nginx を手動でソースからビルドした経験は、Docker を使う上でどのような価値がありますか？
 
 <details><summary>答え</summary>
 
-自己署名の証明書は「自分自身が署名者になっている」からだ。
-
-- `Subject`: 証明書が誰（どのサーバー）のものかを示す
-- `Issuer`: 誰が署名（発行）したかを示す
-
-CA 署名証明書では `Issuer` が「Let's Encrypt Authority X3」のような CA 名になる。
-自己署名の証明書は自分自身が署名者なので `Issuer` = `Subject` になる。
+Dockerfile の `RUN apt-get install -y nginx` の 1 行の裏に、どれだけの作業があるかを理解できる。
+ビルドオプション（`--with-http_ssl_module` など）の意味を知っているため、コンテナ設定を適切に調整できる。
+問題が発生したときに「コンテナの中で何が起きているか」を追跡できる。
+手動構築の経験は、コンテナを「使いこなす」エンジニアになるための土台になる。
 
 </details>
 
-次章では、この章で体験した HTTPS 設定・証明書管理をコンテナ（Docker）に任せることで、手動作業との差を実感します。
+chapter-00 からここまで、全22章の Linux 基礎学習お疲れさまでした。コマンドラインの操作からプロセス管理・ネットワーク・セキュリティ・ソースビルド・コンテナ化まで、手を動かして体験したすべての経験が、これからのエンジニアリングの土台になります。
 
 ---
 
-| [← 第20章: Nginx をソースからビルドする](../chapter-20/README.md) | [全章目次](../README.md) | [第22章: Docker で全部まとめて自動化する →](../chapter-22/README.md) |
+| [← 第20章: OpenSSL 証明書で HTTPS 化する](../chapter-20/README.md) | [全章目次](../README.md) | 最終章 |
 |:---|:---:|---:|

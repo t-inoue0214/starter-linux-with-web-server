@@ -1,511 +1,436 @@
-# 第20章: Nginx をソースからビルドする
+# 第19章: [オプション] OpenSSL 証明書で HTTPS 化する
 
 ## 前提知識
 
-- 第4章: パッケージ管理（`apt install nginx` を実行した。この章でその全工程を手動で再現する）
-- 第10章: プロセスを管理する（`make` の並列コンパイルなどに活用できる）
-- 第11章: パーミッションを管理する（`sudo` の使い方・インストール先の権限）
-- 第15章: systemd でサービスを管理する（`service` コマンドとの違いを理解している）
-- 第19章: SELinux・AppArmor の概念を知る（ソースビルド nginx に AppArmor プロファイルが存在しない事実）
+この章を始める前に、以下の章を完了していること:
+
+- 第12章: ネットワーク基礎（HTTP=80番ポート・HTTPS=443番ポートの知識）
+- 第19章: Nginx をソースからビルドする（`--with-http_ssl_module` 付きでビルド済み）
 
 ## 概要
 
-第4章で実行した `apt install nginx` は、以下の工程をすべて自動で処理していた。
+第19章でビルドした nginx は `--with-http_ssl_module` オプションが有効になっている。
+この章では OpenSSL（暗号ライブラリ）を使って自己署名の証明書を生成し、nginx に HTTPS を設定するまでの全工程を体験する。
 
-1. ソースコードのダウンロード
-2. コンパイル（Debian のビルドサーバーで事前に完了済み）
-3. 依存ライブラリの解決と配置
-4. バイナリ・設定ファイル・ログディレクトリの設置
-5. systemd サービスファイルの登録
-6. AppArmor プロファイルの生成
-
-この章では `apt purge nginx` でいったん削除し、上記すべての工程を手動で再現する。
-`apt` が隠していた工程を体験することで、Linux でソフトウェアが動く仕組みを理解する。
+「HTTP は平文通信」「HTTPS は暗号化通信」という違いを実際に手を動かして体験することが目標だ。
+また、Let's Encrypt（無料の CA）が行う証明書管理を chapter-21（Docker）でコンテナに任せる伏線でもある。
 
 ## 手順
 
-### 20-1. apt purge で nginx を削除する
+### 20-1. HTTP と HTTPS の違い・TLS の仕組みを理解する
 
-第4章からずっと使ってきた nginx を完全に削除する。
-目的は「削除すること」ではなく、「ゼロから再現するための準備」だ。
+HTTP 通信はリクエスト・レスポンスが**平文（暗号化なし）**で送受信される。
+ネットワーク上の第三者が通信を傍受すると、パスワードやクレジットカード番号がそのまま見える。
 
-現在の nginx を確認する。
+HTTPS は TLS（Transport Layer Security）プロトコルを使って通信を暗号化する。
 
-```bash
-$ nginx -v
-nginx version: nginx/1.26.3
-
-$ which nginx
-/usr/sbin/nginx
-```
-
-nginx と関連パッケージを削除する。`apt remove` は設定ファイルを残すが、`apt purge` は `/etc/nginx/` ごと完全に削除する。
-
-```bash
-$ sudo apt purge -y nginx nginx-common
-$ sudo apt autoremove -y
-```
-
-出力例:
+TLS ハンドシェイクの流れを概念的に示す:
 
 ```text
-Reading package lists... Done
-Building dependency tree... Done
-Reading state information... Done
-The following packages will be REMOVED:
-  nginx* nginx-common*
-0 upgraded, 0 newly installed, 2 to remove and 37 not upgraded.
-After this operation, 1085 kB disk space will be freed.
-Removing nginx (1.26.3-3+deb13u5) ...
-Purging configuration files for nginx (1.26.3-3+deb13u5) ...
-Removing nginx-common (1.26.3-3+deb13u5) ...
-Purging configuration files for nginx-common (1.26.3-3+deb13u5) ...
-Processing triggers for man-db (2.12.1-3) ...
+クライアント                    サーバー
+    │                              │
+    │ ① ClientHello                │  ← 対応する暗号方式を提示
+    │──────────────────────────────►
+    │                              │
+    │ ② ServerHello + 証明書       │  ← 証明書（公開鍵入り）を送る
+    │◄──────────────────────────────
+    │                              │
+    │ ③ 証明書を検証               │  ← CA の署名を確認
+    │                              │
+    │ ④ セッション鍵の交換         │  ← 公開鍵暗号（異なる鍵で暗号化・復号する方式）で対称鍵（同じ鍵で暗号化・復号する方式）を共有
+    │◄─────────────────────────────►
+    │                              │
+    │ ⑤ 暗号化通信（対称鍵）       │
+    │◄─────────────────────────────►
 ```
 
-削除できたか確認する。
+**CA（認証局）と自己署名の証明書の違い:**
+
+| | CA 署名証明書 | 自己署名の証明書（オレオレ証明書） |
+|:---|:---|:---|
+| 署名者 | 信頼された第三者機関（Let's Encrypt 等） | 自分自身 |
+| ブラウザの表示 | 鍵マーク（信頼済み） | 警告（「この接続は安全ではありません」） |
+| 用途 | 本番サービス | 開発・学習環境 |
+| コスト | 無料（Let's Encrypt）〜有料 | 無料 |
+
+この章では自己署名の証明書を使う。ブラウザ警告が出るのは想定通りの動作だ。
+
+**SSL モジュールが有効になっているか確認する:**
 
 ```bash
-$ nginx -v
-bash: nginx: command not found
-
-$ which nginx
-（出力なし）
-
-$ ls /etc/nginx/
-ls: cannot access '/etc/nginx/': No such file or directory
+$ /usr/local/nginx/sbin/nginx -V 2>&1 | grep -o 'with-http_ssl_module'
+with-http_ssl_module
 ```
 
-apt が配置していたファイルがすべて消えた。次のセクションからソースで再現する。
+`with-http_ssl_module` が表示されれば、第19章でビルドした nginx に SSL 機能が組み込まれている。
 
-### 20-2. ビルド依存パッケージを確認する
+### 20-2. OpenSSL で秘密鍵と証明書を生成する
 
-`apt install nginx` は依存ライブラリを自動で解決していた。ソースビルドでは自分で把握してインストールする必要がある。
+**学習目標:** 秘密鍵・CSR・証明書の 3 ファイルの関係を理解し、`openssl` コマンドで生成できる。
+
+**openssl のバージョンを確認する:**
 
 ```bash
-$ sudo apt install -y build-essential libpcre2-dev libssl-dev zlib1g-dev
+$ openssl version
+OpenSSL 3.5.6 7 Apr 2026 (Library: OpenSSL 3.5.6 7 Apr 2026)
 ```
 
-インストール済みか確認する。
+**作業ディレクトリ（nginx の設定ディレクトリ）に移動する:**
 
 ```bash
-$ dpkg -l | grep -E "build-essential|libpcre2-dev|libssl-dev|zlib1g-dev"
+$ cd /usr/local/nginx/conf
 ```
 
-出力例:
-
-```text
-ii  build-essential       12.12               amd64  Informational list of build-essential packages
-ii  libpcre2-dev:amd64    10.46-1~deb13u1     amd64  New Perl Compatible Regular Expressions Library
-ii  libssl-dev:amd64      3.5.6-1~deb13u1     amd64  Secure Sockets Layer toolkit - development files
-ii  zlib1g-dev:amd64      1:1.3.dfsg+...+b1   amd64  compression library - development
-```
-
-| パッケージ | 役割 |
-|:---|:---|
-| `build-essential` | `gcc`・`make` などのコンパイラ一式 |
-| `libpcre2-dev` | nginx の URL パターンマッチ（正規表現）に使用 |
-| `libssl-dev` | HTTPS（SSL/TLS）に必要 |
-| `zlib1g-dev` | HTTP レスポンスの gzip 圧縮に使用 |
-
-> `apt install nginx` はこれらを依存関係として自動でインストールしていた。
-> ソースビルドでは自分で明示的にインストールする必要がある。
-
-### 20-3. ソースコードを取得する
-
-nginx.org からソースコードの tarball（圧縮アーカイブ）をダウンロードする。
-
-#### バージョンの確認
-
-nginx.org には「Mainline version」（最新開発版）と「Stable version」（安定版）がある。
-本番環境では Stable version を使うのが基本だ。
+**Step 1: 秘密鍵を生成する（AES-256 で暗号化・パスフレーズあり）:**
 
 ```bash
-$ curl -s https://nginx.org/en/download.html | grep -oP 'nginx-\d+\.\d+\.\d+\.tar\.gz' | head -3
+$ sudo openssl genrsa -aes256 -out server.key 2048
+Enter PEM pass phrase:（任意のパスフレーズ＝秘密の文字列を入力・画面には表示されない）
+Verifying - Enter PEM pass phrase:（同じパスフレーズを再入力）
 ```
 
-出力例:
+> `-aes256` は秘密鍵自体を AES-256 で暗号化するオプション。
+> パスフレーズを設定することで、鍵ファイルが漏洩しても単体では悪用されにくくなる。
+> `2048` はビット数（鍵の強度）。数字はオプションの後ろに書く。
 
-```text
-nginx-1.31.1.tar.gz
-nginx-1.30.2.tar.gz
-nginx-1.28.3.tar.gz
-```
+**Step 2: CSR（証明書の署名要求）を生成する:**
 
-1 番目が Mainline version（奇数のマイナーバージョン: 1.31）、2 番目が Stable version（偶数のマイナーバージョン: 1.30）だ。
-この章では Stable version の `nginx-1.30.2` を使う。
-
-#### ダウンロードと展開
-
-作業ディレクトリを作成してダウンロードする。
+CSR は「この公開鍵で証明書を作ってほしい」というリクエストファイルだ。
+本番環境では CA に提出するが、今回は自己署名（自分で署名）するために使う。
 
 ```bash
-$ mkdir ~/nginx-build && cd ~/nginx-build
-$ wget https://nginx.org/download/nginx-1.30.2.tar.gz
-```
-
-出力例:
-
-```text
---2026-06-07 09:40:00--  https://nginx.org/download/nginx-1.30.2.tar.gz
-Resolving nginx.org... 3.125.197.172
-Connecting to nginx.org|3.125.197.172|:443... connected.
-HTTP request sent, awaiting response... 200 OK
-Length: 1350729 (1.3M) [application/octet-stream]
-Saving to: 'nginx-1.30.2.tar.gz'
-nginx-1.30.2.tar.gz  100%[=========>]  1.29M  1.82MB/s  in 0.7s
-'nginx-1.30.2.tar.gz' saved (1350729 bytes)
-```
-
-tarball を展開してソースツリーを確認する。
-
-```bash
-$ tar xzf nginx-1.30.2.tar.gz
-$ cd nginx-1.30.2
-$ ls
-```
-
-出力例:
-
-```text
-CHANGES  CHANGES.ru  CODE_OF_CONDUCT.md  CONTRIBUTING.md  LICENSE
-README.md  SECURITY.md  SUPPORT.md  auto  conf  configure  contrib  html  man  src
-```
-
-`configure` スクリプトと `src/`（ソースコード本体）が確認できる。
-
-### 20-4. `./configure` でビルドオプションを設定する
-
-`configure` スクリプトはビルドの「設計図」となる `Makefile` を生成するツールだ。
-インストール先とモジュールの選択をここで決める。
-
-```bash
-$ ./configure \
-    --prefix=/usr/local/nginx \
-    --with-http_ssl_module \
-    --with-http_v2_module \
-    --with-pcre
-```
-
-出力例（要約部分）:
-
-```text
-checking for OS
- + Linux 6.8.0-1052-azure x86_64
-checking for C compiler ... found
- + using GNU C compiler
- + gcc version: 14.2.0 (Debian 14.2.0-19)
-...
-Configuration summary
-  + using system PCRE2 library
-  + using system OpenSSL library
-  + using system zlib library
-
-  nginx path prefix: "/usr/local/nginx"
-  nginx binary file: "/usr/local/nginx/sbin/nginx"
-  nginx configuration file: "/usr/local/nginx/conf/nginx.conf"
-  nginx pid file: "/usr/local/nginx/logs/nginx.pid"
-  nginx error log file: "/usr/local/nginx/logs/error.log"
-  nginx http access log file: "/usr/local/nginx/logs/access.log"
+$ sudo openssl req -new \
+    -key server.key \
+    -out server.csr \
+    -subj "/C=JP/ST=Tokyo/O=Learning/CN=localhost"
+Enter pass phrase for server.key:（Step 1 のパスフレーズを入力）
 ```
 
 | オプション | 意味 |
 |:---|:---|
-| `--prefix=/usr/local/nginx` | インストール先（apt は `/usr/sbin/nginx` だったが、ここに集約される） |
-| `--with-http_ssl_module` | HTTPS（SSL/TLS）対応 |
-| `--with-http_v2_module` | HTTP/2 対応 |
-| `--with-pcre` | PCRE 正規表現ライブラリを使用 |
+| `-key server.key` | 秘密鍵を指定 |
+| `-out server.csr` | CSR の出力先 |
+| `-subj "/C=JP/..."` | 証明書に埋め込む組織情報（`-subj` で対話入力を省略） |
 
-configure が完了すると `Makefile` が生成される。
+**SAN 設定ファイルを作成する:**
 
-```bash
-$ ls Makefile
-Makefile
-```
-
-> **対比ポイント:** `apt install nginx` のモジュール構成は Debian パッケージが決めていた。
-> ソースビルドでは `--with-stream`（TCP プロキシ）の追加や不要モジュールの除外を自由に選択できる。
-
-### 20-5. `make` でコンパイルし `make install` でインストールする
-
-#### コンパイル（`make`）
-
-ソースコードをバイナリに変換する。数分かかるので待つ。
+SAN（Subject Alternative Name）は証明書が有効なドメイン・IP アドレスを列挙する拡張情報だ。
+Chrome 58（2017年）以降、SAN がない証明書は `NET::ERR_CERT_COMMON_NAME_INVALID` エラーになる。
 
 ```bash
-$ make
+$ printf "subjectAltName=DNS:localhost,IP:127.0.0.1" \
+    | sudo tee /usr/local/nginx/conf/san.cnf
+subjectAltName=DNS:localhost,IP:127.0.0.1
 ```
 
-出力例（最初と最後の部分）:
-
-```text
-make -f objs/Makefile
-make[1]: Entering directory '/home/vscode/nginx-build/nginx-1.30.2'
-cc -c -pipe  -O -W -Wall -Wpointer-arith -Wno-unused-parameter ...
-    src/core/nginx.c
-...
-cc -pipe  -O -W ... objs/nginx
-make[1]: Leaving directory '/home/vscode/nginx-build/nginx-1.30.2'
-```
-
-> この `make` の数分が、`apt install nginx` では見えなかった工程だ。
-> Debian のビルドサーバーが事前にコンパイルし、パッケージに含めて配布していた。
-
-#### インストール（`sudo make install`）
-
-コンパイルしたバイナリを `/usr/local/nginx/` に配置する。root 権限が必要だ。
+**Step 3: CSR に自己署名して証明書を生成する（san.cnf を使用）:**
 
 ```bash
-$ sudo make install
+$ sudo openssl x509 -req -days 365 \
+    -in server.csr \
+    -signkey server.key \
+    -out server.crt \
+    -extfile /usr/local/nginx/conf/san.cnf
+Enter pass phrase for server.key:（Step 1 のパスフレーズを入力）
+Certificate request self-signature ok
+subject=C=JP, ST=Tokyo, O=Learning, CN=localhost
 ```
 
-出力例:
+`Certificate request self-signature ok` が表示されれば証明書の生成成功だ。
 
-```text
-make -f objs/Makefile install
-make[1]: Entering directory '/home/vscode/nginx-build/nginx-1.30.2'
-test -d '/usr/local/nginx' || mkdir -p '/usr/local/nginx'
-install -m755 objs/nginx '/usr/local/nginx/sbin/nginx'
-install -m644 conf/nginx.conf '/usr/local/nginx/conf/nginx.conf'
-cp conf/nginx.conf '/usr/local/nginx/conf/nginx.conf.default'
-test -d '/usr/local/nginx/logs' || mkdir -p '/usr/local/nginx/logs'
-test -d '/usr/local/nginx/html' || cp -R html '/usr/local/nginx'
-make[1]: Leaving directory '/home/vscode/nginx-build/nginx-1.30.2'
-```
-
-インストール先を確認する。
+**生成されたファイルを確認する:**
 
 ```bash
-$ ls /usr/local/nginx/
-conf  html  logs  sbin
-
-$ ls /usr/local/nginx/sbin/
-nginx
-
-$ /usr/local/nginx/sbin/nginx -v
-nginx version: nginx/1.30.2
+$ sudo ls -la /usr/local/nginx/conf/server.* /usr/local/nginx/conf/san.cnf
+-rw-r--r-- 1 root root   41 Jun  7 10:31 /usr/local/nginx/conf/san.cnf
+-rw-r--r-- 1 root root 1212 Jun  7 10:31 /usr/local/nginx/conf/server.crt
+-rw-r--r-- 1 root root  956 Jun  7 10:31 /usr/local/nginx/conf/server.csr
+-rw------- 1 root root 1886 Jun  7 10:31 /usr/local/nginx/conf/server.key
 ```
 
-### 20-6. ソースビルド nginx を起動して動作確認する
+**各ファイルの役割:**
 
-#### 起動
+| ファイル | 役割 | 公開・秘密 |
+|:---|:---|:---|
+| `server.key` | 秘密鍵（署名・復号に使う。絶対に漏らしてはいけない） | **秘密** |
+| `server.csr` | 証明書の署名要求（自己署名後は不要。削除してもよい） | どちらでも可 |
+| `server.crt` | 証明書（公開鍵と組織情報入り。クライアントに送る） | **公開** |
+| `san.cnf` | SAN 設定ファイル（証明書生成時のみ使用） | どちらでも可 |
 
-apt でインストールしたときは `/usr/sbin/nginx` だったが、ソースビルドでは `/usr/local/nginx/sbin/nginx` のフルパスで起動する。ポート 80 をバインドするために `sudo` が必要だ。
+> **`server.key` のパーミッション:** `-rw-------`（root のみ読み書き可能）。
+> nginx は root で起動するため問題ない。`chmod 644` などで権限を広げないこと。
+
+### 20-3. nginx.conf に HTTPS サーバーブロックを追加する
+
+**学習目標:** nginx の設定ファイルに SSL ブロックを追記し、`-t` で検証・reload できる。
+
+**パスフレーズファイルを作成する:**
+
+パスフレーズ付き秘密鍵を使う場合、nginx の起動・リロードのたびにパスフレーズが必要になる。
+`ssl_password_file` ディレクティブでパスフレーズを読み取るファイルを指定することで、
+自動化された環境でも nginx を起動できる。
 
 ```bash
+# パスフレーズを 1 行だけ書いたファイルを作成する（パスフレーズの部分は実際に設定した値に変える）
+$ printf 'あなたのパスフレーズ' | sudo tee /usr/local/nginx/conf/ssl_pass.txt > /dev/null
+$ sudo chmod 600 /usr/local/nginx/conf/ssl_pass.txt
+```
+
+> **`ssl_pass.txt` の権限:** `chmod 600` で root のみ読み書き可能にする。
+> このファイルが漏洩するとパスフレーズが露出するため、取り扱いに注意する。
+
+**`/usr/local/nginx/conf/nginx.conf` を開いて HTTPS サーバーブロックを追加する:**
+
+既存の `http { ... }` ブロック内の末尾（最後の `}` の直前）に追記する。
+
+```nginx
+    # HTTPS server
+    server {
+        listen       443 ssl;
+        server_name  localhost;
+
+        ssl_certificate      /usr/local/nginx/conf/server.crt;
+        ssl_certificate_key  /usr/local/nginx/conf/server.key;
+        ssl_password_file    /usr/local/nginx/conf/ssl_pass.txt;
+
+        ssl_session_cache    shared:SSL:1m;
+        ssl_session_timeout  5m;
+
+        location / {
+            root   html;
+            index  index.html index.htm;
+        }
+    }
+```
+
+| ディレクティブ | 意味 |
+|:---|:---|
+| `listen 443 ssl;` | ポート 443 で SSL/TLS を受け付ける |
+| `ssl_certificate` | 証明書ファイルのパス（公開される） |
+| `ssl_certificate_key` | 秘密鍵ファイルのパス（絶対に公開しない） |
+| `ssl_password_file` | 秘密鍵のパスフレーズが書かれたファイル |
+
+**設定ファイルの構文テストを行う:**
+
+```bash
+$ sudo /usr/local/nginx/sbin/nginx -t
+nginx: the configuration file /usr/local/nginx/conf/nginx.conf syntax is ok
+nginx: configuration file /usr/local/nginx/conf/nginx.conf test is successful
+```
+
+**設定を反映する:**
+
+```bash
+# nginx が起動中の場合は reload（既存の接続を維持したまま設定を切り替える）
+$ sudo /usr/local/nginx/sbin/nginx -s reload
+
+# nginx が停止していた場合は起動
 $ sudo /usr/local/nginx/sbin/nginx
 ```
 
-#### プロセス確認
+**ポートを確認する（80 と 443 が両方 LISTEN になっていること）:**
 
 ```bash
-$ ps aux | grep nginx | grep -v grep
+$ ss -tlnp | grep ':80\|:443'
+LISTEN 0      511          0.0.0.0:443        0.0.0.0:*
+LISTEN 0      511          0.0.0.0:80         0.0.0.0:*
 ```
 
-出力例:
+### 20-4. HTTPS で動作確認する
 
-```text
-root    8683  0.0  0.0  13364  2584 ?  Ss  09:56  0:00 nginx: master process /usr/local/nginx/sbin/nginx
-nobody  8684  0.0  0.0  15160  4700 ?  S   09:56  0:00 nginx: worker process
-```
+**学習目標:** `curl -k` で HTTPS 接続を確認し、ブラウザ警告の理由を説明できる。
 
-> **apt nginx との違い:** ワーカープロセスが `www-data` ではなく `nobody` で動作している。
-> ソースビルドのデフォルト設定（`/usr/local/nginx/conf/nginx.conf`）では `user` ディレクティブがコメントアウトされており、`nobody` がデフォルトになる。
-> 本番環境では `user www-data;` のように変更して運用する。
-
-#### ポート確認
+**`curl -k` で HTTPS アクセスする:**
 
 ```bash
-$ ss -tlnp | grep :80
-```
-
-出力例:
-
-```text
-LISTEN 0  511  0.0.0.0:80  0.0.0.0:*
-```
-
-#### HTTP での動作確認
-
-```bash
-$ curl -s http://localhost/ | head -8
-```
-
-出力例:
-
-```text
+# -k: 自己署名の証明書を無視して接続（本番では -k は使わない）
+$ curl -k https://localhost/ | head -5
 <!DOCTYPE html>
 <html>
 <head>
 <title>Welcome to nginx!</title>
 <style>
-html { color-scheme: light dark; }
-body { width: 35em; margin: 0 auto;
 ```
 
-VS Code の「ポート」タブまたはブラウザで `http://localhost/` を開くと「Welcome to nginx!」ページが表示される。
-
-#### ログの確認
+**`-v` でハンドシェイクの詳細を確認する:**
 
 ```bash
-$ ls /usr/local/nginx/logs/
-access.log  error.log  nginx.pid
-
-$ cat /usr/local/nginx/logs/access.log
-127.0.0.1 - - [07/Jun/2026:09:56:16 +0000] "GET / HTTP/1.1" 200 896 "-" "curl/8.14.1"
+$ curl -kv https://localhost/ 2>&1 | grep -E "SSL connection|subject:|issuer:|expire date:|HTTP/"
+* SSL connection using TLSv1.3 / TLS_AES_256_GCM_SHA384 / X25519MLKEM768 / RSASSA-PSS
+*  subject: C=JP; ST=Tokyo; O=Learning; CN=localhost
+*  expire date: Jun  7 10:31:57 2027 GMT
+*  issuer: C=JP; ST=Tokyo; O=Learning; CN=localhost
+* using HTTP/1.x
+< HTTP/1.1 200 OK
 ```
 
-> **ログ場所の違い:** apt nginx は `/var/log/nginx/`（システム標準パス）に配置していた。
-> ソースビルドは `--prefix=/usr/local/nginx` で指定した場所の `logs/` に集約される。
+| フィールド | 確認内容 |
+|:---|:---|
+| `TLSv1.3` | 最新の TLS バージョンを使用 |
+| `subject` | 証明書の発行先（サーバー情報） |
+| `issuer` | 証明書の署名者。自己署名のため `subject` と同じ |
+| `expire date` | 有効期限（365日後） |
 
-> **[コンテナ制限] systemd へのサービス登録について**
-> GitHub Codespaces は Docker コンテナ内で動作しているため `systemctl enable nginx` は使用できない。本章では `sudo /usr/local/nginx/sbin/nginx` での直接起動を使用する。実際の RHEL/Ubuntu サーバーでは nginx.service ユニットファイルを作成して `systemctl` で管理する。
+**ブラウザ警告について:**
 
-参考として、本番サーバーで使用するユニットファイルの例を示す。
+Codespaces の「ポート」タブからポート 443 を公開してブラウザでアクセスすると、
+「この接続は安全でない」という警告が表示される。
+これは自己署名の証明書が信頼された CA に署名されていないためで、**想定通りの動作**だ。
 
-```text
-# /etc/systemd/system/nginx.service（参照用）
-[Unit]
-Description=The NGINX HTTP Server (source build)
-After=network.target
+「詳細設定 → localhost にアクセスする（安全でない）」で続行できる。
 
-[Service]
-Type=forking
-PIDFile=/usr/local/nginx/logs/nginx.pid
-ExecStartPre=/usr/local/nginx/sbin/nginx -t
-ExecStart=/usr/local/nginx/sbin/nginx
-ExecReload=/bin/kill -s HUP $MAINPID
-ExecStop=/bin/kill -s QUIT $MAINPID
+> **本番環境での証明書管理:**
+> Let's Encrypt は無料で CA 署名済み証明書を発行する。
+> chapter-21（Docker）では Certbot コンテナが証明書の取得・自動更新を管理する例を紹介する。
+> 「毎年手動で証明書を更新する手間」をコンテナが解消する具体例になる。
 
-[Install]
-WantedBy=multi-user.target
+### 20-5. 証明書の内容を確認する
+
+**学習目標:** `openssl x509` コマンドで証明書のメタデータを読み取れる。
+
+```bash
+$ openssl x509 -noout -text -in /usr/local/nginx/conf/server.crt
+Certificate:
+    Data:
+        Version: 3 (0x2)
+        Serial Number:
+            07:db:61:ac:ec:02:b8:03:c8:b7:51:bc:b1:28:c7:a1:2c:22:98:ec
+        Signature Algorithm: sha256WithRSAEncryption
+        Issuer: C=JP, ST=Tokyo, O=Learning, CN=localhost
+        Validity
+            Not Before: Jun  7 10:31:57 2026 GMT
+            Not After : Jun  7 10:31:57 2027 GMT
+        Subject: C=JP, ST=Tokyo, O=Learning, CN=localhost
+        Subject Public Key Info:
+            Public Key Algorithm: rsaEncryption
+                Public-Key: (2048 bit)
+        X509v3 extensions:
+            X509v3 Subject Alternative Name:
+                DNS:localhost, IP Address:127.0.0.1
 ```
 
-> **ユニットファイル内のシグナルと変数について:**
-> `$MAINPID` は systemd がサービス起動時に自動でセットする変数で、マスタープロセスの PID（プロセス番号）を保持する。シェルスクリプトの変数と同じ記法だが、systemd 専用の仕組みだ。
-> `HUP`（SIGHUP）は「設定ファイルを再読み込みせよ」というシグナルで、第18章の `USR1`（ログ再オープン）とは用途が異なる。
-> `QUIT` は「現在処理中のリクエストを完了してから止まれ（graceful stop: グレースフルストップ）」というシグナルだ。
+**確認すべきポイント:**
 
-### 20-7. apt install との違いを整理する
+| フィールド | 確認内容 |
+|:---|:---|
+| `Issuer` | 「誰が署名したか」。自己署名のため `Subject` と同じ |
+| `Validity` | 有効期限（`Not After` が 365日後になっていること） |
+| `Subject Alternative Name` | `DNS:localhost` と `IP Address:127.0.0.1` が含まれていること |
+| `Signature Algorithm` | `sha256WithRSAEncryption`（SHA-256〔ハッシュ関数〕と RSA〔公開鍵の暗号方式〕を組み合わせた署名アルゴリズム） |
 
-#### apt install との比較
-
-| 比較軸 | apt install nginx | ソースビルド |
-|:---|:---|:---|
-| バイナリの場所 | `/usr/sbin/nginx` | `/usr/local/nginx/sbin/nginx` |
-| 設定ファイル | `/etc/nginx/nginx.conf` | `/usr/local/nginx/conf/nginx.conf` |
-| ログの場所 | `/var/log/nginx/` | `/usr/local/nginx/logs/` |
-| ワーカーユーザー | `www-data` | `nobody`（デフォルト設定のまま） |
-| モジュール選択 | Debian パッケージが決定済み | `./configure` オプションで選択可能 |
-| バージョン指定 | Debian リポジトリの最新 | nginx.org から任意バージョンを選択可能 |
-| 依存関係解決 | 自動（apt が処理） | 手動（`libpcre2-dev` などを自分でインストール） |
-| systemd 登録 | 自動（パッケージに含まれる） | 手動（ユニットファイルを自分で作成） |
-| AppArmor プロファイル | `/etc/apparmor.d/usr.sbin.nginx` が自動生成 | プロファイルなし（第19章の伏線を回収） |
-
-#### ソースビルドのメリット・デメリット
-
-| | 内容 | 具体例 |
-|:---|:---|:---|
-| **メリット** | バージョンを自由に選べる | Debian リポジトリが 1.26 でも、nginx.org から 1.30 をビルドできる |
-| | モジュールを選択できる | `--with-stream` で TCP プロキシ追加、不要モジュールを除外してバイナリ軽量化 |
-| | カスタムパッチを当てられる | 自社向け改修や OSS パッチを適用したバイナリを作れる |
-| | 最新バージョンをすぐ使える | セキュリティパッチ公開の翌日にビルド・適用できる |
-| **デメリット** | 更新を自分で管理しなければならない | `apt upgrade` だけではセキュリティパッチが当たらない |
-| | AppArmor プロファイルが自動生成されない | 第19章で学んだ MAC の保護が受けられない |
-| | 再ビルドに時間がかかる | バージョンアップのたびに `make` の数分が必要 |
-
-> **chapter-22 への伏線:** Docker はコンテナ単位でバージョン・モジュール・セキュリティ設定をパッケージングできる。
-> 「ソースビルドの自由度」を持ちながら「管理コストの高さ」を解消するのがコンテナの価値だ。
+> **`Issuer` と `Subject` が同じ理由:**
+> 自己署名の証明書は「自分が発行して自分が署名した証明書」だ。
+> CA 署名証明書では `Issuer` が Let's Encrypt 等になる。
 
 ## よくあるミス
 
 | ミス | エラーメッセージ例 | 正しい対処 |
 |:---|:---|:---|
-| `configure` 前に依存パッケージが未インストール | `./configure: error: SSL modules require the OpenSSL library.` | `sudo apt install libssl-dev` を実行してから再試行する |
-| `make install` を `sudo` なしで実行 | `install: cannot create regular file '/usr/local/nginx/sbin/nginx': Permission denied` | `sudo make install` で実行する |
-| ポート 80 を `sudo` なしで起動しようとする | `nginx: [emerg] bind() to 0.0.0.0:80 failed (13: Permission denied)` | `sudo /usr/local/nginx/sbin/nginx` で起動する |
-| バージョン番号を URL にハードコードして古いものを使う | （エラーなし。古いバージョンがインストールされる） | nginx.org で最新 stable を必ず確認する |
-| `apt purge` 後に `nginx` コマンドが使えると思い込む | `bash: nginx: command not found` | `/usr/local/nginx/sbin/nginx` のフルパスを使う |
+| `server` ブロックを `http {}` の外に書く | `nginx: [emerg] "server" directive is not allowed here` | `server {}` は `http {}` の内側に書く |
+| 証明書パスに相対パスを使う | `ssl_certificate ... no such file` | `/usr/local/nginx/conf/server.crt` のように絶対パスで書く |
+| `curl -k` なしでアクセス | `curl: (60) SSL certificate problem: self-signed certificate` | 自己署名の証明書には必ず `-k` を付ける |
+| SAN なしで証明書を生成 | Chrome で `NET::ERR_CERT_COMMON_NAME_INVALID` | `san.cnf` を用意して `-extfile san.cnf` を付けて再生成する |
+| `ssl_pass.txt` の権限が広すぎる | `nginx: [warn] "ssl_password_file" ... permission problem` | `chmod 600 ssl_pass.txt` で root のみ読み取り可能にする |
+| パスフレーズを忘れる | `nginx: [emerg] cannot load certificate key ... bad password read` | パスフレーズを必ずメモしておく。忘れた場合は鍵を作り直す |
 
 ## 類似比較
 
-| 比較軸 | `make install` | `apt install` |
+| 比較軸 | `openssl genrsa -aes256` | `openssl genrsa`（パスフレーズなし） |
 |:---|:---|:---|
-| ソース | 自分でダウンロードしたソースコード | Debian パッケージリポジトリ |
-| コンパイル | 自分の環境でリアルタイムに実施 | Debian がコンパイル済みのバイナリを配布 |
-| バージョン | nginx.org の任意バージョンを選択可能 | Debian リポジトリのバージョンのみ |
-| アップデート | tarball を再ダウンロードして再ビルド | `sudo apt upgrade` で自動更新 |
-| アンインストール | `sudo rm -rf /usr/local/nginx/` | `sudo apt purge nginx` |
-| セキュリティパッチ | 自分で管理（手動ビルドが必要） | Debian が配布（apt upgrade で適用） |
+| 鍵ファイルの状態 | AES-256 で暗号化（ファイルが漏洩しても安全） | 平文（ファイルが漏洩すると即座に悪用可能） |
+| nginx 起動時 | パスフレーズが必要（`ssl_password_file` で自動化） | パスフレーズ不要（即座に起動できる） |
+| 用途 | セキュリティを重視する環境 | 開発・テスト環境 |
+
+| 比較軸 | 自己署名の証明書 | Let's Encrypt（ACME） |
+|:---|:---|:---|
+| 署名者 | 自分自身 | 信頼された CA（認証局） |
+| コスト | 無料 | 無料 |
+| 有効期限 | 任意（今回は 365日） | 90日（自動更新可能） |
+| ブラウザ | 警告が出る | 信頼済み（警告なし） |
+| 用途 | 開発・学習 | 本番サービス |
 
 ## 他OSとの比較
 
-| 操作 | Linux（Debian/RHEL） | Windows | macOS |
+| 操作 | Linux (Debian) | Windows | macOS |
 |:---|:---|:---|:---|
-| ソースからビルド | `./configure && make && make install` | MSBuild / Visual Studio | `./configure && make && make install`（Homebrew も可） |
-| パッケージインストール | `apt install` / `dnf install` | winget / MSI インストーラー | `brew install` |
-| バイナリの場所 | `/usr/sbin/` または `/usr/local/` | `C:\Program Files\` | `/usr/local/bin/` |
-| ビルドツール | `gcc`・`make`（apt でインストール） | Visual Studio Build Tools | Xcode Command Line Tools |
+| 証明書の生成 | `openssl genrsa` + `openssl req` + `openssl x509` | `New-SelfSignedCertificate`（PowerShell）または openssl | `openssl`（Homebrew でインストール）または Keychain Access |
+| 証明書のインストール（信頼済みに） | ブラウザやシステムの CA ストアに追加 | 証明書マネージャー（certmgr.msc） | キーチェーンアクセス |
+| HTTPS サーバー設定 | nginx.conf を手動編集 | IIS マネージャー（GUI） | Apache/nginx の設定ファイル |
+| Let's Encrypt | Certbot（apt または Docker） | win-acme | Certbot（Homebrew） |
 
 ## 理解度チェック
 
-1. `apt install nginx` と `./configure && make && make install` では、コンパイルのタイミングが異なる。それぞれいつコンパイルされるか説明してください。
+1. HTTP と HTTPS の通信の違いを説明してください。
+   特に「傍受された場合」に何が起きるかを含めて答えてください。
 
-<details>
-<summary>答え</summary>
+<details><summary>答え</summary>
 
-`apt install nginx` の場合、Debian のビルドサーバーが事前にコンパイルし、バイナリをパッケージに含めて配布している。`apt install` 実行時にコンパイルは行われない。一方、`./configure && make && make install` の場合は自分の Codespaces 環境でリアルタイムにコンパイルが行われる（`make` の数分がその工程）。
+HTTP は通信内容が平文（暗号化なし）で送受信される。ネットワーク上の第三者が通信を傍受すると、
+パスワードや個人情報がそのまま見える。
 
-</details>
-
-2. ソースビルドした nginx のバイナリが `/usr/local/nginx/sbin/nginx` に配置されるのはなぜか。どこでこの場所が決まるか答えてください。
-
-<details>
-<summary>答え</summary>
-
-`./configure --prefix=/usr/local/nginx` の `--prefix` オプションで決まる。`--prefix` を変えればインストール先を自由に変更できる。`apt install nginx` は Debian パッケージ側で `/usr/sbin/nginx` に固定している。
+HTTPS は TLS で通信を暗号化するため、傍受されても内容を解読できない。
+「① クライアントとサーバーが鍵を交換 → ② 共有した鍵で通信を暗号化」という流れで実現する。
 
 </details>
 
-3. `sudo apt purge nginx nginx-common` と `sudo apt remove nginx` の違いを説明してください。
+2. 今回生成した `server.key`・`server.csr`・`server.crt` の 3 ファイルはそれぞれ何のためのファイルですか？
 
-<details>
-<summary>答え</summary>
+<details><summary>答え</summary>
 
-`apt remove` はバイナリを削除するが `/etc/nginx/` などの設定ファイルを残す。`apt purge` はバイナリと設定ファイルの両方を削除する。この章では「ゼロから再現する」ために `apt purge` を使った。
-
-</details>
-
-4. ソースビルドした nginx には AppArmor プロファイルが存在しない。これはどのような問題を引き起こす可能性があるか、第19章の内容をもとに説明してください。
-
-<details>
-<summary>答え</summary>
-
-AppArmor プロファイルがないと MAC（強制アクセス制御）による保護を受けられない。nginx プロセスが侵害された場合、アクセスを制限できず被害拡大のリスクがある。本番環境でソースビルド nginx を使う場合は、AppArmor プロファイルを手動で作成するか、SELinux のコンテキストを適切に設定する必要がある。
+- `server.key`: 秘密鍵。データの署名・復号に使う。絶対に公開してはいけない。
+- `server.csr`: 証明書の署名要求。「この公開鍵で証明書を作ってほしい」というリクエストファイル。
+  本番環境では CA に提出する。自己署名後は不要。
+- `server.crt`: 証明書。公開鍵と組織情報が CA（今回は自分）の署名で保護されたファイル。
+  クライアントに送られ、接続先の正当性を証明する。
 
 </details>
 
-5. ソースビルドした nginx にセキュリティパッチを適用するには何をすればよいか、手順を説明してください。
+3. 自己署名の証明書を使うと、ブラウザが警告を表示するのはなぜですか？
+   CA 署名証明書との違いも含めて答えてください。
 
-<details>
-<summary>答え</summary>
+<details><summary>答え</summary>
 
-1. nginx.org で新しい stable バージョンの tarball をダウンロードする
-2. `tar xzf nginx-X.X.X.tar.gz` で展開する
-3. `cd nginx-X.X.X` でソースディレクトリへ移動する
-4. `./configure` で同じオプションを指定する
-5. `make` でコンパイルする
-6. 実行中の nginx を停止する（`sudo /usr/local/nginx/sbin/nginx -s stop`）
-7. `sudo make install` でバイナリを上書きする
-8. `sudo /usr/local/nginx/sbin/nginx` で再起動する
+自己署名の証明書は「信頼された第三者機関（CA）による署名」がない。
+ブラウザは「この証明書を信頼してよいか」を CA の署名で確認するが、
+自己署名の証明書は自分自身で署名しているため「誰が保証したか分からない」と判断して警告を表示する。
 
-`apt upgrade` のような一発更新はできないため、バージョン管理の手間がかかる。
+CA 署名証明書（Let's Encrypt 等）は信頼された CA が「このサーバーは確かに本人だ」と署名しているため、
+ブラウザは警告なしに接続できる。
 
 </details>
 
-次章では、この章で動かしたソースビルド nginx に OpenSSL で作成した自己署名の証明書を組み合わせ、HTTPS 化を設定します。
+4. `ssl_password_file` ディレクティブを設定する目的は何ですか？
+   設定しない場合と比較して答えてください。
+
+<details><summary>答え</summary>
+
+`ssl_password_file` はパスフレーズ付き秘密鍵のパスフレーズをファイルから自動的に読み取るディレクティブ。
+
+**設定しない場合:** nginx の起動・リロードのたびに対話的なパスフレーズ入力が必要になる。
+スクリプトや自動再起動（サーバー再起動後）でパスフレーズが入力できず、nginx が起動できない。
+
+**設定した場合:** パスフレーズをファイルに保存しておくことで自動起動・リロードが可能になる。
+ただし `ssl_pass.txt` の権限を `600`（root のみ読み書き可能）にして管理する必要がある。
+
+</details>
+
+5. `openssl x509 -noout -text -in server.crt` の出力で「`Issuer` と `Subject` が同じ」になっているのはなぜですか？
+
+<details><summary>答え</summary>
+
+自己署名の証明書は「自分自身が署名者になっている」からだ。
+
+- `Subject`: 証明書が誰（どのサーバー）のものかを示す
+- `Issuer`: 誰が署名（発行）したかを示す
+
+CA 署名証明書では `Issuer` が「Let's Encrypt Authority X3」のような CA 名になる。
+自己署名の証明書は自分自身が署名者なので `Issuer` = `Subject` になる。
+
+</details>
+
+次章では、この章で体験した HTTPS 設定・証明書管理をコンテナ（Docker）に任せることで、手動作業との差を実感します。
 
 ---
 
-| [← 第19章: SELinux・AppArmor の概念を知る](../chapter-19/README.md) | [全章目次](../README.md) | [第21章: OpenSSL 証明書で HTTPS 化する →](../chapter-21/README.md) |
+| [← 第19章: Nginx をソースからビルドする](../chapter-19/README.md) | [全章目次](../README.md) | [第21章: Docker で全部まとめて自動化する →](../chapter-21/README.md) |
 |:---|:---:|---:|
